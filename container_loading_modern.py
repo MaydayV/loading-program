@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-集装箱配载软件 (Container Loading Software) - 现代UI版本
+集装箱配载软件 (Container Loading Software) - 现代UI版本 v4.0
 使用 PyQt6 + OpenGL 实现可拖动旋转的3D视图
+支持多集装箱、装载图导出、拖拽调整等高级功能
 """
 
 import sys
@@ -9,15 +10,25 @@ import json
 import math
 import numpy as np
 from dataclasses import dataclass, asdict, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import copy
+import io
+import os
 
 try:
     from openpyxl import Workbook, load_workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.drawing.image import Image as XLImage
     EXCEL_SUPPORT = True
 except ImportError:
     EXCEL_SUPPORT = False
+
+# 图片导出支持
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_SUPPORT = True
+except ImportError:
+    PIL_SUPPORT = False
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -113,6 +124,7 @@ class PlacedCargo:
     z: float
     rotated: bool = False
     step_number: int = 0  # 装箱步骤编号
+    container_index: int = 0  # 所属集装箱索引（多集装箱时使用）
     
     @property
     def actual_length(self) -> float:
@@ -133,6 +145,34 @@ class PlacedCargo:
     @property
     def center_z(self) -> float:
         return self.z + self.cargo.height / 2
+
+
+@dataclass
+class ContainerLoadingResult:
+    """单个集装箱的装载结果"""
+    container: Container
+    container_index: int
+    placed_cargos: List[PlacedCargo] = field(default_factory=list)
+    
+    @property
+    def total_volume(self) -> float:
+        return sum(p.cargo.volume for p in self.placed_cargos)
+    
+    @property
+    def total_weight(self) -> float:
+        return sum(p.cargo.weight for p in self.placed_cargos)
+    
+    @property
+    def volume_utilization(self) -> float:
+        if self.container.volume == 0:
+            return 0
+        return (self.total_volume / self.container.volume) * 100
+    
+    @property
+    def weight_utilization(self) -> float:
+        if self.container.max_weight == 0:
+            return 0
+        return (self.total_weight / self.container.max_weight) * 100
 
 
 # ==================== 容器预设 ====================
@@ -564,12 +604,14 @@ class LoadingAlgorithm:
 
 
 class Container3DView(QOpenGLWidget):
-    """OpenGL 3D视图组件"""
+    """OpenGL 3D视图组件 - 支持拖拽选择和多集装箱"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.container: Optional[Container] = None
         self.placed_cargos: List[PlacedCargo] = []
+        self.all_container_results: List[ContainerLoadingResult] = []  # 多集装箱结果
+        self.current_container_index: int = -1  # -1表示显示全部概览
         
         # 视角控制
         self.rotation_x = 25
@@ -582,7 +624,59 @@ class Container3DView(QOpenGLWidget):
         self.last_mouse_pos = None
         self.mouse_button = None
         
+        # 拖拽选择
+        self.drag_mode = False  # 是否处于拖拽调整模式
+        self.selected_cargo_index = -1  # 当前选中的货物索引
+        self.dragging = False
+        self.drag_start_pos = None
+        self.drag_axis = None  # 'x', 'y', 'z'
+        
+        # 选择回调
+        self.on_cargo_selected = None  # 选中货物时的回调
+        self.on_cargo_moved = None  # 移动货物后的回调
+        
         self.setMinimumSize(600, 400)
+    
+    def set_drag_mode(self, enabled: bool):
+        """设置拖拽模式"""
+        self.drag_mode = enabled
+        if not enabled:
+            self.selected_cargo_index = -1
+            self.dragging = False
+        self.update()
+    
+    def set_multi_container_results(self, results: List[ContainerLoadingResult]):
+        """设置多集装箱结果"""
+        self.all_container_results = results
+        if results:
+            self.current_container_index = 0  # 默认显示第一个
+            self.update_display()
+        else:
+            self.current_container_index = -1
+            self.placed_cargos = []
+        self.update()
+    
+    def show_container(self, index: int):
+        """切换显示特定集装箱 (-1 显示全部概览)"""
+        self.current_container_index = index
+        self.update_display()
+        self.reset_view()
+    
+    def update_display(self):
+        """更新显示内容"""
+        if not self.all_container_results:
+            return
+        
+        if self.current_container_index >= 0 and self.current_container_index < len(self.all_container_results):
+            # 显示单个集装箱
+            result = self.all_container_results[self.current_container_index]
+            self.container = result.container
+            self.placed_cargos = result.placed_cargos
+        else:
+            # 显示第一个集装箱作为默认
+            if self.all_container_results:
+                self.container = self.all_container_results[0].container
+                self.placed_cargos = self.all_container_results[0].placed_cargos
     
     def initializeGL(self):
         """初始化OpenGL"""
@@ -636,12 +730,16 @@ class Container3DView(QOpenGLWidget):
         # 绘制集装箱
         self.draw_container_wireframe()
         
-        # 绘制已放置的货物
-        for placed in self.placed_cargos:
-            self.draw_cargo(placed)
+        # 绘制已放置的货物（带索引用于选择）
+        for i, placed in enumerate(self.placed_cargos):
+            self.draw_cargo(placed, i)
         
         # 绘制坐标轴
         self.draw_axes()
+        
+        # 如果处于拖拽模式且有选中货物，显示拖拽轴
+        if self.drag_mode and 0 <= self.selected_cargo_index < len(self.placed_cargos):
+            self.draw_drag_axes(self.placed_cargos[self.selected_cargo_index])
     
     def draw_grid(self):
         """绘制地面网格"""
@@ -755,7 +853,7 @@ class Container3DView(QOpenGLWidget):
         
         glEnable(GL_LIGHTING)
     
-    def draw_cargo(self, placed: PlacedCargo):
+    def draw_cargo(self, placed: PlacedCargo, index: int = -1):
         """绘制货物"""
         x, y, z = placed.x, placed.z, placed.y
         l = placed.actual_length
@@ -763,6 +861,13 @@ class Container3DView(QOpenGLWidget):
         w = placed.actual_width
         
         r, g, b = placed.cargo.color
+        
+        # 如果是选中状态，增加亮度
+        is_selected = self.drag_mode and index == self.selected_cargo_index
+        if is_selected:
+            r = min(1.0, r + 0.3)
+            g = min(1.0, g + 0.3)
+            b = min(1.0, b + 0.3)
         
         # 定义顶点
         vertices = [
@@ -796,8 +901,12 @@ class Container3DView(QOpenGLWidget):
         
         # 绘制边框
         glDisable(GL_LIGHTING)
-        glColor3f(0.1, 0.1, 0.1)
-        glLineWidth(1.5)
+        if is_selected:
+            glColor3f(1.0, 1.0, 0.0)  # 选中时用黄色边框
+            glLineWidth(3.0)
+        else:
+            glColor3f(0.1, 0.1, 0.1)
+            glLineWidth(1.5)
         
         edges = [
             (0, 1), (1, 2), (2, 3), (3, 0),
@@ -837,10 +946,143 @@ class Container3DView(QOpenGLWidget):
         
         glEnable(GL_LIGHTING)
     
+    def draw_drag_axes(self, placed: PlacedCargo):
+        """绘制拖拽轴"""
+        glDisable(GL_LIGHTING)
+        glLineWidth(4)
+        
+        # 货物中心位置
+        cx = placed.x + placed.actual_length / 2
+        cy = placed.z + placed.cargo.height / 2
+        cz = placed.y + placed.actual_width / 2
+        
+        axis_len = max(placed.actual_length, placed.actual_width, placed.cargo.height) * 0.7
+        
+        glBegin(GL_LINES)
+        # X轴 - 红色（长度方向）
+        glColor3f(1, 0, 0)
+        glVertex3f(cx - axis_len/2, cy, cz)
+        glVertex3f(cx + axis_len/2, cy, cz)
+        
+        # Y轴 - 绿色（高度方向）
+        glColor3f(0, 1, 0)
+        glVertex3f(cx, cy - axis_len/2, cz)
+        glVertex3f(cx, cy + axis_len/2, cz)
+        
+        # Z轴 - 蓝色（宽度方向）
+        glColor3f(0, 0, 1)
+        glVertex3f(cx, cy, cz - axis_len/2)
+        glVertex3f(cx, cy, cz + axis_len/2)
+        glEnd()
+        
+        glEnable(GL_LIGHTING)
+    
+    def hit_test(self, mouse_x: int, mouse_y: int) -> int:
+        """碰撞检测 - 返回点击位置的货物索引，-1表示未命中"""
+        if not self.placed_cargos or not self.container:
+            return -1
+        
+        # 使用OpenGL选择模式进行拾取
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        
+        glSelectBuffer(512)
+        glRenderMode(GL_SELECT)
+        
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        
+        # 设置拾取区域
+        gluPickMatrix(mouse_x, viewport[3] - mouse_y, 5, 5, viewport)
+        
+        aspect = viewport[2] / viewport[3] if viewport[3] > 0 else 1
+        gluPerspective(45, aspect, 0.1, 10000)
+        
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        
+        # 设置视图变换
+        max_dim = max(self.container.length, self.container.width, self.container.height)
+        distance = max_dim * 2.5 / self.zoom
+        
+        glTranslatef(self.pan_x, self.pan_y, -distance)
+        glRotatef(self.rotation_x, 1, 0, 0)
+        glRotatef(self.rotation_y, 0, 1, 0)
+        glTranslatef(-self.container.length/2, -self.container.height/2, -self.container.width/2)
+        
+        glInitNames()
+        glPushName(0)
+        
+        # 绘制可拾取的货物
+        for i, placed in enumerate(self.placed_cargos):
+            glLoadName(i)
+            self.draw_cargo_for_picking(placed)
+        
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        
+        hits = glRenderMode(GL_RENDER)
+        
+        if hits:
+            # 返回最近的货物
+            min_depth = float('inf')
+            selected = -1
+            for hit in hits:
+                min_z, max_z, names = hit
+                if names and min_z < min_depth:
+                    min_depth = min_z
+                    selected = names[0]
+            return selected
+        
+        return -1
+    
+    def draw_cargo_for_picking(self, placed: PlacedCargo):
+        """绘制用于拾取的货物（简化版）"""
+        x, y, z = placed.x, placed.z, placed.y
+        l = placed.actual_length
+        h = placed.cargo.height
+        w = placed.actual_width
+        
+        glBegin(GL_QUADS)
+        # 简单绘制六个面
+        # 底面
+        glVertex3f(x, y, z); glVertex3f(x+l, y, z); glVertex3f(x+l, y, z+w); glVertex3f(x, y, z+w)
+        # 顶面
+        glVertex3f(x, y+h, z); glVertex3f(x, y+h, z+w); glVertex3f(x+l, y+h, z+w); glVertex3f(x+l, y+h, z)
+        # 前面
+        glVertex3f(x, y, z); glVertex3f(x, y+h, z); glVertex3f(x+l, y+h, z); glVertex3f(x+l, y, z)
+        # 后面
+        glVertex3f(x, y, z+w); glVertex3f(x+l, y, z+w); glVertex3f(x+l, y+h, z+w); glVertex3f(x, y+h, z+w)
+        # 左面
+        glVertex3f(x, y, z); glVertex3f(x, y, z+w); glVertex3f(x, y+h, z+w); glVertex3f(x, y+h, z)
+        # 右面
+        glVertex3f(x+l, y, z); glVertex3f(x+l, y+h, z); glVertex3f(x+l, y+h, z+w); glVertex3f(x+l, y, z+w)
+        glEnd()
+    
     def mousePressEvent(self, event):
         """鼠标按下"""
         self.last_mouse_pos = event.pos()
         self.mouse_button = event.button()
+        
+        # 拖拽模式下的选择逻辑
+        if self.drag_mode and event.button() == Qt.MouseButton.LeftButton:
+            # 尝试选择货物
+            try:
+                hit_index = self.hit_test(event.pos().x(), event.pos().y())
+                if hit_index >= 0:
+                    self.selected_cargo_index = hit_index
+                    self.dragging = True
+                    self.drag_start_pos = event.pos()
+                    if self.on_cargo_selected:
+                        self.on_cargo_selected(hit_index)
+                    self.update()
+                else:
+                    self.selected_cargo_index = -1
+                    self.update()
+            except Exception:
+                # 如果选择失败，使用简单的索引选择
+                pass
     
     def mouseMoveEvent(self, event):
         """鼠标移动"""
@@ -850,7 +1092,30 @@ class Container3DView(QOpenGLWidget):
         dx = event.pos().x() - self.last_mouse_pos.x()
         dy = event.pos().y() - self.last_mouse_pos.y()
         
-        if self.mouse_button == Qt.MouseButton.LeftButton:
+        # 拖拽模式下的移动逻辑
+        if self.drag_mode and self.dragging and self.selected_cargo_index >= 0:
+            if self.selected_cargo_index < len(self.placed_cargos):
+                placed = self.placed_cargos[self.selected_cargo_index]
+                # 简单的移动：水平移动改变X，垂直移动按Shift键改变Z，否则改变Y
+                move_scale = self.container.length / 500  # 移动比例
+                
+                modifiers = QApplication.keyboardModifiers()
+                if modifiers == Qt.KeyboardModifier.ShiftModifier:
+                    # Shift + 拖动改变高度
+                    placed.z = max(0, min(self.container.height - placed.cargo.height, 
+                                         placed.z - dy * move_scale))
+                else:
+                    # 正常拖动改变X和Y
+                    placed.x = max(0, min(self.container.length - placed.actual_length, 
+                                         placed.x + dx * move_scale))
+                    placed.y = max(0, min(self.container.width - placed.actual_width, 
+                                         placed.y + dy * move_scale))
+                
+                self.last_mouse_pos = event.pos()
+                self.update()
+                return
+        
+        if self.mouse_button == Qt.MouseButton.LeftButton and not self.drag_mode:
             # 左键拖动 - 旋转
             self.rotation_y += dx * 0.5
             self.rotation_x += dy * 0.5
@@ -869,8 +1134,12 @@ class Container3DView(QOpenGLWidget):
     
     def mouseReleaseEvent(self, event):
         """鼠标释放"""
+        if self.dragging and self.on_cargo_moved:
+            self.on_cargo_moved(self.selected_cargo_index)
+        
         self.last_mouse_pos = None
         self.mouse_button = None
+        self.dragging = False
     
     def wheelEvent(self, event):
         """鼠标滚轮"""
@@ -946,12 +1215,263 @@ class ModernButton(QPushButton):
             """)
 
 
+class LoadingImageGenerator:
+    """装载图生成器"""
+    
+    def __init__(self, container: Container, placed_cargos: List[PlacedCargo]):
+        self.container = container
+        self.placed_cargos = placed_cargos
+        self.margin = 50  # 边距
+        self.scale = 1.0  # 比例尺
+    
+    def calculate_scale(self, max_width: int, max_height: int, container_dim1: float, container_dim2: float):
+        """计算适合图像尺寸的比例尺"""
+        available_width = max_width - 2 * self.margin
+        available_height = max_height - 2 * self.margin
+        
+        scale_x = available_width / container_dim1 if container_dim1 > 0 else 1
+        scale_y = available_height / container_dim2 if container_dim2 > 0 else 1
+        
+        return min(scale_x, scale_y)
+    
+    def generate_top_view(self, width: int = 800, height: int = 600) -> Optional['Image.Image']:
+        """生成俯视图（X-Y平面，从上往下看）"""
+        if not PIL_SUPPORT:
+            return None
+        
+        self.scale = self.calculate_scale(width, height, self.container.length, self.container.width)
+        
+        img = Image.new('RGB', (width, height), color=(240, 240, 245))
+        draw = ImageDraw.Draw(img)
+        
+        # 绘制容器轮廓
+        container_x = self.margin
+        container_y = self.margin
+        container_w = int(self.container.length * self.scale)
+        container_h = int(self.container.width * self.scale)
+        
+        draw.rectangle([container_x, container_y, container_x + container_w, container_y + container_h],
+                      outline=(100, 100, 100), width=3)
+        
+        # 绘制货物（按高度排序，底层的先画）
+        sorted_cargos = sorted(self.placed_cargos, key=lambda p: p.z)
+        
+        for placed in sorted_cargos:
+            x = container_x + int(placed.x * self.scale)
+            y = container_y + int(placed.y * self.scale)
+            w = int(placed.actual_length * self.scale)
+            h = int(placed.actual_width * self.scale)
+            
+            r, g, b = placed.cargo.color
+            color = (int(r * 255), int(g * 255), int(b * 255))
+            
+            # 绘制货物矩形
+            draw.rectangle([x, y, x + w, y + h], fill=color, outline=(50, 50, 50), width=1)
+            
+            # 添加货物名称（如果空间足够）
+            if w > 30 and h > 15:
+                try:
+                    font = ImageFont.truetype("arial.ttf", 10)
+                except:
+                    font = ImageFont.load_default()
+                
+                text = placed.cargo.name[:8]  # 最多显示8个字符
+                draw.text((x + 2, y + 2), text, fill=(0, 0, 0), font=font)
+        
+        # 添加标题
+        try:
+            title_font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            title_font = ImageFont.load_default()
+        
+        draw.text((10, 10), "俯视图 (Top View)", fill=(50, 50, 50), font=title_font)
+        
+        # 添加尺寸标注
+        draw.text((container_x, height - 30), f"长度: {self.container.length}cm", fill=(80, 80, 80))
+        draw.text((width - 150, container_y + container_h + 10), f"宽度: {self.container.width}cm", fill=(80, 80, 80))
+        
+        return img
+    
+    def generate_front_view(self, width: int = 800, height: int = 600) -> Optional['Image.Image']:
+        """生成正视图（X-Z平面，从前往后看）"""
+        if not PIL_SUPPORT:
+            return None
+        
+        self.scale = self.calculate_scale(width, height, self.container.length, self.container.height)
+        
+        img = Image.new('RGB', (width, height), color=(240, 240, 245))
+        draw = ImageDraw.Draw(img)
+        
+        # 绘制容器轮廓
+        container_x = self.margin
+        container_y = height - self.margin - int(self.container.height * self.scale)
+        container_w = int(self.container.length * self.scale)
+        container_h = int(self.container.height * self.scale)
+        
+        draw.rectangle([container_x, container_y, container_x + container_w, container_y + container_h],
+                      outline=(100, 100, 100), width=3)
+        
+        # 绘制货物
+        for placed in self.placed_cargos:
+            x = container_x + int(placed.x * self.scale)
+            y = container_y + container_h - int((placed.z + placed.cargo.height) * self.scale)
+            w = int(placed.actual_length * self.scale)
+            h = int(placed.cargo.height * self.scale)
+            
+            r, g, b = placed.cargo.color
+            color = (int(r * 255), int(g * 255), int(b * 255))
+            
+            draw.rectangle([x, y, x + w, y + h], fill=color, outline=(50, 50, 50), width=1)
+        
+        # 添加标题
+        try:
+            title_font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            title_font = ImageFont.load_default()
+        
+        draw.text((10, 10), "正视图 (Front View)", fill=(50, 50, 50), font=title_font)
+        draw.text((container_x, height - 30), f"长度: {self.container.length}cm", fill=(80, 80, 80))
+        draw.text((10, container_y - 20), f"高度: {self.container.height}cm", fill=(80, 80, 80))
+        
+        return img
+    
+    def generate_side_view(self, width: int = 800, height: int = 600) -> Optional['Image.Image']:
+        """生成侧视图（Y-Z平面，从左往右看）"""
+        if not PIL_SUPPORT:
+            return None
+        
+        self.scale = self.calculate_scale(width, height, self.container.width, self.container.height)
+        
+        img = Image.new('RGB', (width, height), color=(240, 240, 245))
+        draw = ImageDraw.Draw(img)
+        
+        # 绘制容器轮廓
+        container_x = self.margin
+        container_y = height - self.margin - int(self.container.height * self.scale)
+        container_w = int(self.container.width * self.scale)
+        container_h = int(self.container.height * self.scale)
+        
+        draw.rectangle([container_x, container_y, container_x + container_w, container_y + container_h],
+                      outline=(100, 100, 100), width=3)
+        
+        # 绘制货物
+        for placed in self.placed_cargos:
+            x = container_x + int(placed.y * self.scale)
+            y = container_y + container_h - int((placed.z + placed.cargo.height) * self.scale)
+            w = int(placed.actual_width * self.scale)
+            h = int(placed.cargo.height * self.scale)
+            
+            r, g, b = placed.cargo.color
+            color = (int(r * 255), int(g * 255), int(b * 255))
+            
+            draw.rectangle([x, y, x + w, y + h], fill=color, outline=(50, 50, 50), width=1)
+        
+        # 添加标题
+        try:
+            title_font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            title_font = ImageFont.load_default()
+        
+        draw.text((10, 10), "侧视图 (Side View)", fill=(50, 50, 50), font=title_font)
+        draw.text((container_x, height - 30), f"宽度: {self.container.width}cm", fill=(80, 80, 80))
+        draw.text((10, container_y - 20), f"高度: {self.container.height}cm", fill=(80, 80, 80))
+        
+        return img
+    
+    def generate_combined_view(self, width: int = 1200, height: int = 900) -> Optional['Image.Image']:
+        """生成组合视图（三视图合一）"""
+        if not PIL_SUPPORT:
+            return None
+        
+        # 计算子图尺寸
+        sub_width = width // 2 - 20
+        sub_height = height // 2 - 20
+        
+        combined = Image.new('RGB', (width, height), color=(255, 255, 255))
+        
+        # 生成三个视图
+        top_view = self.generate_top_view(sub_width, sub_height)
+        front_view = self.generate_front_view(sub_width, sub_height)
+        side_view = self.generate_side_view(sub_width, sub_height)
+        
+        # 拼接
+        if top_view:
+            combined.paste(top_view, (10, 10))
+        if front_view:
+            combined.paste(front_view, (sub_width + 20, 10))
+        if side_view:
+            combined.paste(side_view, (10, sub_height + 20))
+        
+        # 添加统计信息框
+        draw = ImageDraw.Draw(combined)
+        stats_x = sub_width + 20
+        stats_y = sub_height + 20
+        stats_w = sub_width
+        stats_h = sub_height
+        
+        draw.rectangle([stats_x, stats_y, stats_x + stats_w, stats_y + stats_h],
+                      fill=(250, 250, 250), outline=(200, 200, 200), width=2)
+        
+        # 添加统计文字
+        try:
+            font = ImageFont.truetype("arial.ttf", 14)
+            title_font = ImageFont.truetype("arial.ttf", 18)
+        except:
+            font = ImageFont.load_default()
+            title_font = font
+        
+        y_offset = stats_y + 20
+        draw.text((stats_x + 20, y_offset), "装载统计 (Loading Statistics)", fill=(50, 50, 50), font=title_font)
+        y_offset += 35
+        
+        total_volume = sum(p.cargo.volume for p in self.placed_cargos)
+        total_weight = sum(p.cargo.weight for p in self.placed_cargos)
+        vol_util = (total_volume / self.container.volume) * 100 if self.container.volume > 0 else 0
+        wt_util = (total_weight / self.container.max_weight) * 100 if self.container.max_weight > 0 else 0
+        
+        stats_text = [
+            f"容器: {self.container.name}",
+            f"容器尺寸: {self.container.length} × {self.container.width} × {self.container.height} cm",
+            f"装载件数: {len(self.placed_cargos)}",
+            f"总体积: {total_volume/1000000:.2f} m³",
+            f"空间利用率: {vol_util:.1f}%",
+            f"总重量: {total_weight:.1f} kg",
+            f"载重利用率: {wt_util:.1f}%",
+        ]
+        
+        for text in stats_text:
+            draw.text((stats_x + 20, y_offset), text, fill=(80, 80, 80), font=font)
+            y_offset += 25
+        
+        return combined
+    
+    def save_images(self, base_path: str) -> List[str]:
+        """保存所有视图图片"""
+        saved_files = []
+        
+        views = [
+            ('top', self.generate_top_view),
+            ('front', self.generate_front_view),
+            ('side', self.generate_side_view),
+            ('combined', self.generate_combined_view),
+        ]
+        
+        for name, generator in views:
+            img = generator()
+            if img:
+                file_path = f"{base_path}_{name}.png"
+                img.save(file_path)
+                saved_files.append(file_path)
+        
+        return saved_files
+
+
 class ContainerLoadingApp(QMainWindow):
     """主窗口"""
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("集装箱配载软件 v3.0")
+        self.setWindowTitle("集装箱配载软件 v4.0 - 多集装箱支持")
         self.setMinimumSize(1500, 900)
         self.resize(1600, 1000)
         
@@ -963,6 +1483,11 @@ class ContainerLoadingApp(QMainWindow):
         self.loading_rules = DEFAULT_RULES.copy()
         self.custom_containers: dict = {}
         self.last_statistics: dict = {}
+        
+        # 多集装箱支持
+        self.multi_container_mode = False
+        self.container_results: List[ContainerLoadingResult] = []
+        self.container_count = 1
         
         self.setup_style()
         self.setup_ui()
@@ -1301,22 +1826,54 @@ class ContainerLoadingApp(QMainWindow):
         action_group = QGroupBox("⚙️ 配载操作")
         action_layout = QVBoxLayout(action_group)
         
+        # 多集装箱模式
+        multi_layout = QHBoxLayout()
+        self.multi_container_check = QCheckBox("多集装箱模式")
+        self.multi_container_check.setChecked(False)
+        self.multi_container_check.stateChanged.connect(self.toggle_multi_container_mode)
+        multi_layout.addWidget(self.multi_container_check)
+        
+        multi_layout.addWidget(QLabel("数量:"))
+        self.container_count_spin = QSpinBox()
+        self.container_count_spin.setRange(1, 100)
+        self.container_count_spin.setValue(1)
+        self.container_count_spin.setEnabled(False)
+        multi_layout.addWidget(self.container_count_spin)
+        action_layout.addLayout(multi_layout)
+        
         start_btn = ModernButton("🚀 开始配载", primary=True)
         start_btn.clicked.connect(self.start_loading)
         action_layout.addWidget(start_btn)
         
-        manual_btn = ModernButton("✋ 手动调整")
+        # 拖拽调整模式
+        drag_layout = QHBoxLayout()
+        self.drag_mode_btn = ModernButton("🎯 拖拽调整模式")
+        self.drag_mode_btn.setCheckable(True)
+        self.drag_mode_btn.clicked.connect(self.toggle_drag_mode)
+        self.drag_mode_btn.setToolTip("开启后可在3D视图中直接拖拽调整货物位置\n左键点击选中，拖动移动，Shift+拖动改变高度")
+        drag_layout.addWidget(self.drag_mode_btn)
+        action_layout.addLayout(drag_layout)
+        
+        manual_btn = ModernButton("✋ 精确调整")
         manual_btn.clicked.connect(self.enable_manual_edit)
-        manual_btn.setToolTip("配载后手动调整货物位置")
+        manual_btn.setToolTip("配载后通过对话框精确调整货物位置")
         action_layout.addWidget(manual_btn)
         
         clear_result_btn = ModernButton("清除结果")
         clear_result_btn.clicked.connect(self.clear_loading)
         action_layout.addWidget(clear_result_btn)
         
-        export_plan_btn = ModernButton("📋 导出详细方案")
+        # 导出选项
+        export_layout = QHBoxLayout()
+        export_plan_btn = ModernButton("📋 导出方案")
         export_plan_btn.clicked.connect(self.export_loading_plan)
-        action_layout.addWidget(export_plan_btn)
+        export_layout.addWidget(export_plan_btn)
+        
+        export_image_btn = ModernButton("🖼️ 导出图片")
+        export_image_btn.clicked.connect(self.export_loading_images)
+        export_image_btn.setToolTip("导出装载图（俯视图、正视图、侧视图）")
+        export_layout.addWidget(export_image_btn)
+        action_layout.addLayout(export_layout)
         
         scroll_layout.addWidget(action_group)
         
@@ -1346,11 +1903,27 @@ class ContainerLoadingApp(QMainWindow):
         right_layout.setSpacing(12)
         right_layout.setContentsMargins(0, 0, 0, 0)
         
+        # 多集装箱选择器
+        self.container_selector_group = QGroupBox("📦 集装箱选择")
+        container_selector_layout = QHBoxLayout(self.container_selector_group)
+        
+        container_selector_layout.addWidget(QLabel("当前查看:"))
+        self.container_selector = QComboBox()
+        self.container_selector.addItem("全部概览")
+        self.container_selector.currentIndexChanged.connect(self.on_container_selector_changed)
+        container_selector_layout.addWidget(self.container_selector, 1)
+        
+        self.container_selector_group.setVisible(False)  # 默认隐藏，多集装箱模式时显示
+        right_layout.addWidget(self.container_selector_group)
+        
         # 3D视图
         view_group = QGroupBox("🎮 3D配载视图 (左键旋转 | 滚轮缩放 | 右键平移)")
         view_layout = QVBoxLayout(view_group)
         
         self.gl_widget = Container3DView()
+        # 设置拖拽回调
+        self.gl_widget.on_cargo_selected = self.on_cargo_drag_selected
+        self.gl_widget.on_cargo_moved = self.on_cargo_drag_moved
         view_layout.addWidget(self.gl_widget)
         
         # 视图控制按钮
@@ -1371,6 +1944,13 @@ class ContainerLoadingApp(QMainWindow):
         view_btn_layout.addWidget(reset_btn)
         
         view_layout.addLayout(view_btn_layout)
+        
+        # 拖拽模式提示
+        self.drag_hint_label = QLabel("")
+        self.drag_hint_label.setStyleSheet("color: #FFEB3B; font-size: 12px;")
+        self.drag_hint_label.setVisible(False)
+        view_layout.addWidget(self.drag_hint_label)
+        
         right_layout.addWidget(view_group)
         
         # 统计信息
@@ -1846,13 +2426,25 @@ class ContainerLoadingApp(QMainWindow):
         active_rules.sort(key=lambda x: x[0], reverse=True)
         rules = [r[1] for r in active_rules]
         
+        # 多集装箱模式
+        if self.multi_container_mode:
+            self.start_multi_container_loading(rules)
+        else:
+            self.start_single_container_loading(rules)
+    
+    def start_single_container_loading(self, rules: list):
+        """单集装箱配载"""
         # 执行配载
         algorithm = LoadingAlgorithm(self.container, rules=rules, cargo_groups=self.cargo_groups)
         loaded, not_loaded = algorithm.load_all(self.cargos)
         
         self.placed_cargos = loaded
+        self.container_results = []  # 清空多集装箱结果
         self.gl_widget.placed_cargos = loaded
         self.gl_widget.update()
+        
+        # 隐藏集装箱选择器
+        self.container_selector_group.setVisible(False)
         
         # 更新统计
         stats = algorithm.get_statistics()
@@ -1884,7 +2476,7 @@ class ContainerLoadingApp(QMainWindow):
         self.cog_label.setText(cog_text)
         
         # 更新装载步骤表格
-        self.update_steps_table(stats.get('loading_steps', []))
+        self.update_steps_table(algorithm.get_loading_steps())
         
         if not_loaded:
             cargo_names = ", ".join(set(c.name for c in not_loaded))
@@ -1900,6 +2492,106 @@ class ContainerLoadingApp(QMainWindow):
                 f"空间利用率: {stats['volume_utilization']:.1f}%\n"
                 f"载重利用率: {stats['weight_utilization']:.1f}%\n"
                 f"重心状态: {cog_status}")
+    
+    def start_multi_container_loading(self, rules: list):
+        """多集装箱配载"""
+        container_count = self.container_count_spin.value()
+        
+        self.container_results = []
+        remaining_cargos = []
+        
+        # 展开所有货物
+        for cargo in self.cargos:
+            for i in range(cargo.quantity):
+                single_cargo = copy.copy(cargo)
+                single_cargo.quantity = 1
+                single_cargo.id = f"{cargo.id}_{i}"
+                remaining_cargos.append(single_cargo)
+        
+        # 依次填充每个集装箱
+        for container_idx in range(container_count):
+            if not remaining_cargos:
+                break
+            
+            # 创建算法实例
+            algorithm = LoadingAlgorithm(self.container, rules=rules)
+            
+            # 尝试装载剩余货物
+            loaded_in_this = []
+            still_remaining = []
+            
+            for cargo in remaining_cargos:
+                if algorithm.place_cargo(cargo):
+                    placed = algorithm.placed_cargos[-1]
+                    placed.container_index = container_idx
+                    loaded_in_this.append(placed)
+                else:
+                    still_remaining.append(cargo)
+            
+            # 创建结果对象
+            result = ContainerLoadingResult(
+                container=copy.copy(self.container),
+                container_index=container_idx,
+                placed_cargos=loaded_in_this
+            )
+            self.container_results.append(result)
+            
+            remaining_cargos = still_remaining
+        
+        # 更新集装箱选择器
+        self.container_selector.blockSignals(True)
+        self.container_selector.clear()
+        self.container_selector.addItem("全部概览")
+        for i, result in enumerate(self.container_results):
+            util = result.volume_utilization
+            self.container_selector.addItem(f"集装箱 #{i+1} ({util:.1f}%)")
+        self.container_selector.blockSignals(False)
+        
+        # 显示集装箱选择器
+        self.container_selector_group.setVisible(True)
+        
+        # 设置3D视图为多集装箱模式
+        self.gl_widget.set_multi_container_results(self.container_results)
+        
+        # 合并所有装载的货物
+        self.placed_cargos = []
+        for result in self.container_results:
+            self.placed_cargos.extend(result.placed_cargos)
+        
+        # 更新统计
+        self.update_stats_for_container(-1)
+        
+        # 更新装载步骤表格（显示所有集装箱）
+        all_steps = []
+        step_num = 0
+        for result in self.container_results:
+            for placed in result.placed_cargos:
+                step_num += 1
+                all_steps.append({
+                    'step': step_num,
+                    'cargo_name': f"[箱{result.container_index+1}] {placed.cargo.name}",
+                    'position': f"X:{placed.x:.0f} Y:{placed.y:.0f} Z:{placed.z:.0f}",
+                    'securing': '标准加固'
+                })
+        self.update_steps_table(all_steps)
+        
+        # 显示结果
+        total_loaded = len(self.placed_cargos)
+        total_remaining = len(remaining_cargos)
+        used_containers = len([r for r in self.container_results if r.placed_cargos])
+        
+        msg = f"多集装箱配载完成！\n\n"
+        msg += f"使用集装箱: {used_containers} 个\n"
+        msg += f"总装载: {total_loaded} 件\n"
+        
+        if remaining_cargos:
+            cargo_names = ", ".join(set(c.name for c in remaining_cargos))
+            msg += f"未装载: {total_remaining} 件\n"
+            msg += f"未装载货物: {cargo_names}"
+        else:
+            msg += f"所有货物已成功装载！"
+        
+        QMessageBox.information(self, "多集装箱配载完成", msg)
     
     def update_steps_table(self, steps: list):
         """更新装载步骤表格"""
@@ -2447,6 +3139,164 @@ class ContainerLoadingApp(QMainWindow):
                 advice.append("  6. 注意集装箱门端加固，防止开门时货物倾倒")
         
         return "\n".join(advice)
+    
+    # ==================== 多集装箱功能 ====================
+    
+    def toggle_multi_container_mode(self, state):
+        """切换多集装箱模式"""
+        self.multi_container_mode = state == 2
+        self.container_count_spin.setEnabled(self.multi_container_mode)
+        self.container_selector_group.setVisible(False)  # 开始配载后才显示
+    
+    def on_container_selector_changed(self, index):
+        """集装箱选择器变化"""
+        if not self.container_results:
+            return
+        
+        if index == 0:
+            # 全部概览 - 显示第一个集装箱
+            if self.container_results:
+                self.gl_widget.show_container(0)
+                self.update_stats_for_container(-1)  # 显示总体统计
+        else:
+            # 显示特定集装箱
+            container_index = index - 1
+            if container_index < len(self.container_results):
+                self.gl_widget.show_container(container_index)
+                self.update_stats_for_container(container_index)
+    
+    def update_stats_for_container(self, container_index: int):
+        """更新特定集装箱的统计信息"""
+        if container_index < 0:
+            # 显示总体统计
+            total_loaded = sum(len(r.placed_cargos) for r in self.container_results)
+            total_volume = sum(r.total_volume for r in self.container_results)
+            total_weight = sum(r.total_weight for r in self.container_results)
+            
+            # 计算平均利用率
+            avg_vol_util = sum(r.volume_utilization for r in self.container_results) / len(self.container_results) if self.container_results else 0
+            avg_wt_util = sum(r.weight_utilization for r in self.container_results) / len(self.container_results) if self.container_results else 0
+            
+            self.stats_label.setText(
+                f"共 {len(self.container_results)} 个集装箱 | "
+                f"总装载: {total_loaded} 件 | "
+                f"总体积: {total_volume/1000000:.2f} m³ | "
+                f"总重量: {total_weight:.1f} kg"
+            )
+            self.volume_progress.setValue(int(avg_vol_util))
+            self.volume_label.setText(f"{avg_vol_util:.1f}%")
+            self.weight_progress.setValue(int(avg_wt_util))
+            self.weight_label.setText(f"{avg_wt_util:.1f}%")
+        else:
+            # 显示单个集装箱统计
+            result = self.container_results[container_index]
+            self.stats_label.setText(
+                f"集装箱 #{container_index + 1} | "
+                f"装载: {len(result.placed_cargos)} 件 | "
+                f"体积: {result.total_volume/1000000:.2f} m³ | "
+                f"重量: {result.total_weight:.1f} kg"
+            )
+            self.volume_progress.setValue(int(result.volume_utilization))
+            self.volume_label.setText(f"{result.volume_utilization:.1f}%")
+            self.weight_progress.setValue(int(result.weight_utilization))
+            self.weight_label.setText(f"{result.weight_utilization:.1f}%")
+    
+    # ==================== 拖拽调整功能 ====================
+    
+    def toggle_drag_mode(self, checked: bool):
+        """切换拖拽调整模式"""
+        self.gl_widget.set_drag_mode(checked)
+        
+        if checked:
+            self.drag_mode_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF9800;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                    font-weight: bold;
+                }
+            """)
+            self.drag_hint_label.setText("拖拽模式已开启：左键选中货物 → 拖动移动 → Shift+拖动改变高度")
+            self.drag_hint_label.setVisible(True)
+        else:
+            self.drag_mode_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #37474F;
+                    color: white;
+                    border: 1px solid #546E7A;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                }
+            """)
+            self.drag_hint_label.setVisible(False)
+    
+    def on_cargo_drag_selected(self, index: int):
+        """货物被拖拽选中"""
+        if 0 <= index < len(self.placed_cargos):
+            cargo = self.placed_cargos[index]
+            self.drag_hint_label.setText(
+                f"已选中: {cargo.cargo.name} | 位置: ({cargo.x:.0f}, {cargo.y:.0f}, {cargo.z:.0f})"
+            )
+    
+    def on_cargo_drag_moved(self, index: int):
+        """货物被拖拽移动后"""
+        if 0 <= index < len(self.placed_cargos):
+            cargo = self.placed_cargos[index]
+            self.drag_hint_label.setText(
+                f"已移动: {cargo.cargo.name} | 新位置: ({cargo.x:.0f}, {cargo.y:.0f}, {cargo.z:.0f})"
+            )
+            # 更新统计信息
+            self.update_loading_stats()
+    
+    def update_loading_stats(self):
+        """更新装载统计信息"""
+        if not self.placed_cargos:
+            return
+        
+        total_volume = sum(p.cargo.volume for p in self.placed_cargos)
+        total_weight = sum(p.cargo.weight for p in self.placed_cargos)
+        vol_util = (total_volume / self.container.volume) * 100 if self.container.volume > 0 else 0
+        wt_util = (total_weight / self.container.max_weight) * 100 if self.container.max_weight > 0 else 0
+        
+        self.volume_progress.setValue(int(vol_util))
+        self.volume_label.setText(f"{vol_util:.1f}%")
+        self.weight_progress.setValue(int(wt_util))
+        self.weight_label.setText(f"{wt_util:.1f}%")
+    
+    # ==================== 导出装载图片 ====================
+    
+    def export_loading_images(self):
+        """导出装载图片"""
+        if not self.placed_cargos:
+            QMessageBox.warning(self, "警告", "没有配载结果可导出")
+            return
+        
+        if not PIL_SUPPORT:
+            QMessageBox.warning(self, "警告", 
+                "未安装 Pillow 库，无法生成图片。\n请运行: pip install Pillow")
+            return
+        
+        # 选择保存目录
+        directory = QFileDialog.getExistingDirectory(self, "选择保存目录")
+        if not directory:
+            return
+        
+        try:
+            # 生成图片
+            generator = LoadingImageGenerator(self.container, self.placed_cargos)
+            base_name = os.path.join(directory, "loading_plan")
+            saved_files = generator.save_images(base_name)
+            
+            if saved_files:
+                QMessageBox.information(self, "成功", 
+                    f"已保存 {len(saved_files)} 张装载图：\n" + 
+                    "\n".join([os.path.basename(f) for f in saved_files]))
+            else:
+                QMessageBox.warning(self, "警告", "图片生成失败")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败: {e}")
 
 
 def main():
