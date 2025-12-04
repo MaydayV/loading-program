@@ -327,7 +327,7 @@ DEFAULT_RULES = [
 
 
 class LoadingAlgorithm:
-    """装载算法类"""
+    """装载算法类 - 优化版，目标是最高装载率"""
     
     def __init__(self, container: Container, rules: List[LoadingRule] = None, 
                  cargo_groups: List[CargoGroup] = None):
@@ -337,6 +337,8 @@ class LoadingAlgorithm:
         self.cargo_groups = cargo_groups or []
         self.step_counter = 0
         self.similar_size_tolerance = 50  # mm，相近尺寸容差
+        # 空间网格步长，用于更精细的位置搜索
+        self.grid_step = 10  # cm
     
     def can_place(self, cargo: Cargo, x: float, y: float, z: float, rotated: bool) -> bool:
         # 检查是否允许旋转
@@ -351,6 +353,9 @@ class LoadingAlgorithm:
         if cargo.bottom_only and z > 0.01:
             return False
         
+        # 严格的边界检查 - 不允许任何超出
+        if x < -0.01 or y < -0.01 or z < -0.01:
+            return False
         if x + length > self.container.length + 0.01:
             return False
         if y + width > self.container.width + 0.01:
@@ -358,30 +363,27 @@ class LoadingAlgorithm:
         if z + height > self.container.height + 0.01:
             return False
         
+        # 碰撞检测
         for placed in self.placed_cargos:
             pl = placed.actual_length
             pw = placed.actual_width
             ph = placed.cargo.height
             
-            if (x < placed.x + pl and x + length > placed.x and
-                y < placed.y + pw and y + width > placed.y and
-                z < placed.z + ph and z + height > placed.z):
+            # 使用严格的碰撞检测
+            if (x < placed.x + pl - 0.01 and x + length > placed.x + 0.01 and
+                y < placed.y + pw - 0.01 and y + width > placed.y + 0.01 and
+                z < placed.z + ph - 0.01 and z + height > placed.z + 0.01):
                 return False
         
+        # 堆叠支撑检查
         if z > 0.01:
             support_area = 0
             required_support = length * width * 0.7
             
             for placed in self.placed_cargos:
-                if abs(placed.z + placed.cargo.height - z) < 0.01:
+                if abs(placed.z + placed.cargo.height - z) < 0.1:
                     pl = placed.actual_length
                     pw = placed.actual_width
-                    
-                    # 检查相近尺寸堆叠规则
-                    if abs(cargo.length - placed.cargo.length) <= self.similar_size_tolerance or \
-                       abs(cargo.width - placed.cargo.width) <= self.similar_size_tolerance:
-                        # 允许相近尺寸堆叠
-                        pass
                     
                     overlap_x = max(0, min(x + length, placed.x + pl) - max(x, placed.x))
                     overlap_y = max(0, min(y + width, placed.y + pw) - max(y, placed.y))
@@ -392,33 +394,194 @@ class LoadingAlgorithm:
         
         return True
     
-    def find_position(self, cargo: Cargo) -> Optional[Tuple[float, float, float, bool]]:
-        best_position = None
-        best_score = float('inf')
+    def calculate_best_rotation_for_layer(self, cargo: Cargo) -> bool:
+        """计算在当前层最优的旋转方向，目标是最大化可放置数量"""
+        if not cargo.allow_rotate:
+            return False
         
-        positions = [(0, 0, 0)]
+        # 计算不旋转时每层可放数量
+        cols_no_rotate = int(self.container.width // cargo.width)
+        rows_no_rotate = int(self.container.length // cargo.length)
+        count_no_rotate = cols_no_rotate * rows_no_rotate
         
+        # 计算旋转时每层可放数量
+        cols_rotated = int(self.container.width // cargo.length)
+        rows_rotated = int(self.container.length // cargo.width)
+        count_rotated = cols_rotated * rows_rotated
+        
+        # 选择能放更多货物的方向
+        return count_rotated > count_no_rotate
+    
+    def get_candidate_positions(self, cargo: Cargo, rotated: bool) -> List[Tuple[float, float, float]]:
+        """获取所有候选放置位置 - 优化版"""
+        positions = set()
+        
+        length = cargo.width if rotated else cargo.length
+        width = cargo.length if rotated else cargo.width
+        
+        # 基础位置：原点
+        positions.add((0, 0, 0))
+        
+        # 基于已放置货物生成候选位置
         for placed in self.placed_cargos:
             pl = placed.actual_length
             pw = placed.actual_width
             ph = placed.cargo.height
             
-            positions.append((placed.x + pl, placed.y, placed.z))
-            positions.append((placed.x, placed.y + pw, placed.z))
+            # 货物右侧
+            positions.add((placed.x + pl, placed.y, placed.z))
+            # 货物后方
+            positions.add((placed.x, placed.y + pw, placed.z))
+            # 货物顶部（如果可堆叠）
             if placed.cargo.stackable and not cargo.bottom_only:
-                positions.append((placed.x, placed.y, placed.z + ph))
+                positions.add((placed.x, placed.y, placed.z + ph))
+            
+            # 额外的紧凑位置 - 靠近已放置货物的边缘
+            # 右侧对齐
+            if placed.x + pl + length <= self.container.length:
+                positions.add((placed.x + pl, 0, placed.z))
+                positions.add((placed.x + pl, 0, 0))
+            # 后方对齐
+            if placed.y + pw + width <= self.container.width:
+                positions.add((0, placed.y + pw, placed.z))
+                positions.add((0, placed.y + pw, 0))
+        
+        # 沿着容器边缘的位置
+        for placed in self.placed_cargos:
+            pl = placed.actual_length
+            pw = placed.actual_width
+            # 尝试贴着左边界
+            positions.add((0, placed.y, placed.z))
+            positions.add((0, placed.y + pw, placed.z))
+            # 尝试贴着前边界
+            positions.add((placed.x, 0, placed.z))
+            positions.add((placed.x + pl, 0, placed.z))
+        
+        return list(positions)
+    
+    def calculate_placement_score(self, cargo: Cargo, x: float, y: float, z: float, rotated: bool) -> float:
+        """计算放置位置的得分 - 分数越低越好"""
+        length = cargo.width if rotated else cargo.length
+        width = cargo.length if rotated else cargo.width
+        
+        # 基础得分：优先填充角落和边缘
+        # 越靠近原点越好
+        distance_score = x * 1.0 + y * 1.5 + z * 2.0
+        
+        # 紧凑性得分：与已有货物的贴合度
+        contact_score = 0
+        for placed in self.placed_cargos:
+            pl = placed.actual_length
+            pw = placed.actual_width
+            ph = placed.cargo.height
+            
+            # 检查是否紧贴（在X、Y或Z方向上相邻）
+            # X方向贴合
+            if abs(x - (placed.x + pl)) < 0.1 or abs(placed.x - (x + length)) < 0.1:
+                overlap_y = max(0, min(y + width, placed.y + pw) - max(y, placed.y))
+                overlap_z = max(0, min(z + cargo.height, placed.z + ph) - max(z, placed.z))
+                contact_score -= overlap_y * overlap_z * 0.01
+            
+            # Y方向贴合
+            if abs(y - (placed.y + pw)) < 0.1 or abs(placed.y - (y + width)) < 0.1:
+                overlap_x = max(0, min(x + length, placed.x + pl) - max(x, placed.x))
+                overlap_z = max(0, min(z + cargo.height, placed.z + ph) - max(z, placed.z))
+                contact_score -= overlap_x * overlap_z * 0.01
+            
+            # Z方向贴合（底部支撑）
+            if abs(z - (placed.z + ph)) < 0.1:
+                overlap_x = max(0, min(x + length, placed.x + pl) - max(x, placed.x))
+                overlap_y = max(0, min(y + width, placed.y + pw) - max(y, placed.y))
+                contact_score -= overlap_x * overlap_y * 0.02  # 底部支撑更重要
+        
+        # 边界贴合加分
+        if x < 0.1:  # 贴左边界
+            contact_score -= width * cargo.height * 0.005
+        if y < 0.1:  # 贴前边界
+            contact_score -= length * cargo.height * 0.005
+        if z < 0.1:  # 贴底部
+            contact_score -= length * width * 0.01
+        
+        # 空间利用率：优先选择能更好利用剩余空间的位置
+        remaining_x = self.container.length - (x + length)
+        remaining_y = self.container.width - (y + width)
+        
+        # 如果剩余空间太小无法放置其他货物，给予惩罚
+        waste_penalty = 0
+        if 0 < remaining_x < 30:  # 剩余空间太小
+            waste_penalty += remaining_x * 0.5
+        if 0 < remaining_y < 30:
+            waste_penalty += remaining_y * 0.5
+        
+        return distance_score + contact_score + waste_penalty
+    
+    def find_best_rotation(self, cargo: Cargo, x: float, y: float, z: float) -> Tuple[bool, float]:
+        """找到最佳旋转方向，返回(是否旋转, 得分)"""
+        best_rotated = False
+        best_score = float('inf')
         
         rotations = [False]
         if cargo.allow_rotate:
             rotations.append(True)
         
-        for x, y, z in positions:
-            for rotated in rotations:
+        for rotated in rotations:
+            if self.can_place(cargo, x, y, z, rotated):
+                score = self.calculate_placement_score(cargo, x, y, z, rotated)
+                if score < best_score:
+                    best_score = score
+                    best_rotated = rotated
+        
+        return best_rotated, best_score
+
+    def find_position(self, cargo: Cargo) -> Optional[Tuple[float, float, float, bool]]:
+        """寻找最佳放置位置 - 优化版，优先考虑最大化装载率的旋转方向"""
+        best_position = None
+        best_score = float('inf')
+        
+        # 首先计算最优旋转方向（基于能放置更多货物）
+        optimal_rotation = self.calculate_best_rotation_for_layer(cargo)
+        
+        # 按优先级尝试旋转方向：先尝试最优方向
+        if cargo.allow_rotate:
+            rotations = [optimal_rotation, not optimal_rotation]
+        else:
+            rotations = [False]
+        
+        for rotated in rotations:
+            # 获取候选位置
+            positions = self.get_candidate_positions(cargo, rotated)
+            
+            for x, y, z in positions:
                 if self.can_place(cargo, x, y, z, rotated):
-                    score = x + y * 2 + z * 3
+                    score = self.calculate_placement_score(cargo, x, y, z, rotated)
+                    # 如果使用最优旋转方向，给予额外优势
+                    if rotated == optimal_rotation:
+                        score -= 100  # 奖励最优旋转
                     if score < best_score:
                         best_score = score
                         best_position = (x, y, z, rotated)
+        
+        # 如果常规位置找不到，尝试更细粒度的搜索
+        if best_position is None:
+            # 网格搜索
+            z_levels = [0]
+            for placed in self.placed_cargos:
+                z_levels.append(placed.z + placed.cargo.height)
+            z_levels = sorted(set(z_levels))
+            
+            for z in z_levels:
+                for x in range(0, int(self.container.length), self.grid_step):
+                    for y in range(0, int(self.container.width), self.grid_step):
+                        for rotated in rotations:
+                            if self.can_place(cargo, x, y, z, rotated):
+                                score = self.calculate_placement_score(cargo, x, y, z, rotated)
+                                if rotated == optimal_rotation:
+                                    score -= 100
+                                if score < best_score:
+                                    best_score = score
+                                    best_position = (x, y, z, rotated)
+        
+        return best_position
         
         return best_position
     
