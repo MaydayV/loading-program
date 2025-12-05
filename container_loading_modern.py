@@ -70,7 +70,8 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QFileDialog, QMessageBox, QSplitter, QFrame, QSpinBox,
     QDoubleSpinBox, QStyle, QStyleFactory, QScrollArea,
-    QDialog, QGridLayout, QFormLayout, QListWidget
+    QDialog, QGridLayout, QFormLayout, QListWidget, QTabWidget,
+    QProgressDialog
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
@@ -78,6 +79,25 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+
+
+@dataclass
+class PalletContent:
+    """托盘内的货物位置信息"""
+    cargo: 'Cargo'  # 原始货物
+    x: float  # 在托盘内的X位置
+    y: float  # 在托盘内的Y位置
+    z: float  # 在托盘内的Z位置（从托盘面开始）
+    rotated: bool = False  # 是否旋转
+    quantity: int = 1  # 该货物的数量
+    
+    @property
+    def actual_length(self) -> float:
+        return self.cargo.width if self.rotated else self.cargo.length
+    
+    @property
+    def actual_width(self) -> float:
+        return self.cargo.length if self.rotated else self.cargo.width
 
 
 @dataclass
@@ -97,6 +117,11 @@ class Cargo:
     allow_rotate: bool = True  # 是否允许旋转
     bottom_only: bool = False  # 是否只能放在底层
     priority: int = 0  # 装载优先级（数字越大越优先）
+    # 组托相关字段
+    is_pallet: bool = False  # 是否是组托后的托盘
+    pallet_base_height: float = 15  # 托盘底座高度 (cm)
+    pallet_contents: List['PalletContent'] = field(default_factory=list)  # 托盘内的货物列表
+    original_cargos: List['Cargo'] = field(default_factory=list)  # 原始货物列表（未展开）
     
     def __post_init__(self):
         if not self.id:
@@ -114,6 +139,13 @@ class Cargo:
     @property
     def total_weight(self) -> float:
         return self.weight * self.quantity
+    
+    @property
+    def content_height(self) -> float:
+        """货物实际高度（不含托盘底座）"""
+        if self.is_pallet:
+            return self.height - self.pallet_base_height
+        return self.height
 
 
 @dataclass
@@ -864,6 +896,7 @@ class Container3DView(QOpenGLWidget):
     def update_display(self):
         """更新显示内容"""
         if not self.all_container_results:
+            self.update()
             return
         
         if self.current_container_index >= 0 and self.current_container_index < len(self.all_container_results):
@@ -879,6 +912,8 @@ class Container3DView(QOpenGLWidget):
                 self.placed_cargos = []
                 for result in self.all_container_results:
                     self.placed_cargos.extend(result.placed_cargos)
+        
+        self.update()
     
     def is_overview_mode(self) -> bool:
         """是否处于全局概览模式"""
@@ -900,6 +935,10 @@ class Container3DView(QOpenGLWidget):
         
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # 仅启用线条抗锯齿，不启用多边形抗锯齿（会产生斜线）
+        glEnable(GL_LINE_SMOOTH)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
     
     def resizeGL(self, w, h):
         """调整视口"""
@@ -1381,14 +1420,20 @@ class Container3DView(QOpenGLWidget):
         glVertex3f(*vertices[1]); glVertex3f(*vertices[5]); glVertex3f(*vertices[6]); glVertex3f(*vertices[2])
         glEnd()
         
-        # 绘制边框
+        # 绘制边框 - 使用更柔和的颜色和适当的线宽
         glDisable(GL_LIGHTING)
+        
+        # 轻微偏移避免z-fighting
+        glEnable(GL_POLYGON_OFFSET_LINE)
+        glPolygonOffset(-1.0, -1.0)
+        
         if is_selected:
-            glColor3f(1.0, 1.0, 0.0)  # 选中时用黄色边框
-            glLineWidth(3.0)
+            glColor4f(1.0, 1.0, 0.0, 1.0)  # 选中时用黄色边框
+            glLineWidth(2.5)
         else:
-            glColor3f(0.1, 0.1, 0.1)
-            glLineWidth(1.5)
+            # 使用货物颜色的深色版本作为边框，更自然
+            glColor4f(r * 0.3, g * 0.3, b * 0.3, 0.8)
+            glLineWidth(1.0)
         
         edges = [
             (0, 1), (1, 2), (2, 3), (3, 0),
@@ -1402,6 +1447,7 @@ class Container3DView(QOpenGLWidget):
             glVertex3f(*vertices[j])
         glEnd()
         
+        glDisable(GL_POLYGON_OFFSET_LINE)
         glEnable(GL_LIGHTING)
     
     def draw_axes(self):
@@ -1478,10 +1524,10 @@ class Container3DView(QOpenGLWidget):
         glDisable(GL_DITHER)
         glDisable(GL_TEXTURE_2D)
         
-        # 设置视图变换 (与 paintGL_single 相同)
+        # 设置视图变换 (与 paintGL_single 保持完全一致！)
         glLoadIdentity()
         max_dim = max(self.container.length, self.container.width, self.container.height)
-        distance = max_dim * 2.5 / self.zoom
+        distance = max_dim * 1.8 / self.zoom  # 必须与 paintGL_single 一致
         
         glTranslatef(self.pan_x, self.pan_y, -distance)
         glRotatef(self.rotation_x, 1, 0, 0)
@@ -1603,18 +1649,19 @@ class Container3DView(QOpenGLWidget):
                 return
         
         if self.mouse_button == Qt.MouseButton.LeftButton and not self.drag_mode:
-            # 左键拖动 - 旋转
-            self.rotation_y += dx * 0.5
-            self.rotation_x += dy * 0.5
+            # 左键拖动 - 旋转（更平滑）
+            self.rotation_y += dx * 0.3
+            self.rotation_x += dy * 0.3
             self.rotation_x = max(-90, min(90, self.rotation_x))
         elif self.mouse_button == Qt.MouseButton.RightButton:
-            # 右键拖动 - 平移
-            self.pan_x += dx * 0.5
-            self.pan_y -= dy * 0.5
+            # 右键拖动 - 平移（根据缩放级别调整速度）
+            pan_speed = 0.5 / self.zoom
+            self.pan_x += dx * pan_speed
+            self.pan_y -= dy * pan_speed
         elif self.mouse_button == Qt.MouseButton.MiddleButton:
             # 中键拖动 - 缩放
-            self.zoom *= 1 + dy * 0.005
-            self.zoom = max(0.1, min(5, self.zoom))
+            self.zoom *= 1 + dy * 0.003
+            self.zoom = max(0.1, min(10, self.zoom))
         
         self.last_mouse_pos = event.pos()
         self.update()
@@ -1629,10 +1676,12 @@ class Container3DView(QOpenGLWidget):
         self.dragging = False
     
     def wheelEvent(self, event):
-        """鼠标滚轮"""
+        """鼠标滚轮 - 平滑缩放"""
         delta = event.angleDelta().y()
-        self.zoom *= 1 + delta * 0.001
-        self.zoom = max(0.1, min(5, self.zoom))
+        # 使用更平滑的缩放因子
+        zoom_factor = 1 + delta * 0.0008
+        self.zoom *= zoom_factor
+        self.zoom = max(0.1, min(10, self.zoom))  # 允许更大的缩放范围
         self.update()
     
     def reset_view(self):
@@ -2631,6 +2680,18 @@ class ContainerLoadingApp(QMainWindow):
         reset_btn.clicked.connect(self.gl_widget.reset_view)
         view_btn_layout.addWidget(reset_btn)
         
+        # 全屏按钮
+        fullscreen_btn = ModernButton("⛶ 全屏")
+        fullscreen_btn.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold;")
+        fullscreen_btn.clicked.connect(self.show_fullscreen_3d_view)
+        view_btn_layout.addWidget(fullscreen_btn)
+        
+        # 使用手册按钮
+        help_btn = ModernButton("❓ 使用手册")
+        help_btn.setStyleSheet("background-color: #6A1B9A; color: white; font-weight: bold;")
+        help_btn.clicked.connect(self.show_user_manual)
+        view_btn_layout.addWidget(help_btn)
+        
         view_layout.addLayout(view_btn_layout)
         
         # 拖拽模式提示
@@ -2685,12 +2746,31 @@ class ContainerLoadingApp(QMainWindow):
             mid_info.addWidget(label)
         selected_cargo_layout.addLayout(mid_info)
         
-        # 右侧：加固建议
+        # 右侧：加固建议和托盘详情按钮
         right_info = QVBoxLayout()
         self.cargo_securing_label = QLabel("加固建议: -")
         self.cargo_securing_label.setWordWrap(True)
         self.cargo_securing_label.setStyleSheet("color: #FFD54F; font-size: 11px;")
         right_info.addWidget(self.cargo_securing_label)
+        
+        # 查看托盘详情按钮（初始隐藏）
+        self.view_pallet_btn = QPushButton("🔍 查看组托详情")
+        self.view_pallet_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background-color: #66BB6A;
+            }
+        """)
+        self.view_pallet_btn.setVisible(False)
+        self.view_pallet_btn.clicked.connect(self.show_selected_pallet_details)
+        right_info.addWidget(self.view_pallet_btn)
+        
         right_info.addStretch()
         selected_cargo_layout.addLayout(right_info)
         
@@ -2956,15 +3036,35 @@ class ContainerLoadingApp(QMainWindow):
         
         self.cargo_table.setRowCount(len(self.cargos))
         for i, cargo in enumerate(self.cargos):
-            self.cargo_table.setItem(i, 0, QTableWidgetItem(cargo.name))
+            # 名称列 - 如果是托盘，添加标记
+            name_text = cargo.name
+            if cargo.is_pallet:
+                name_text = f"📦 {cargo.name}"
+            name_item = QTableWidgetItem(name_text)
+            if cargo.is_pallet:
+                name_item.setBackground(QColor(255, 243, 224))  # 浅橙色背景
+            self.cargo_table.setItem(i, 0, name_item)
+            
             # 尺寸显示为整数，更紧凑
-            self.cargo_table.setItem(i, 1, QTableWidgetItem(
-                f"{int(cargo.length)}×{int(cargo.width)}×{int(cargo.height)}"))
-            self.cargo_table.setItem(i, 2, QTableWidgetItem(f"{cargo.weight}kg"))
-            self.cargo_table.setItem(i, 3, QTableWidgetItem(str(cargo.quantity)))
+            size_item = QTableWidgetItem(f"{int(cargo.length)}×{int(cargo.width)}×{int(cargo.height)}")
+            if cargo.is_pallet:
+                size_item.setBackground(QColor(255, 243, 224))
+            self.cargo_table.setItem(i, 1, size_item)
+            
+            weight_item = QTableWidgetItem(f"{cargo.weight}kg")
+            if cargo.is_pallet:
+                weight_item.setBackground(QColor(255, 243, 224))
+            self.cargo_table.setItem(i, 2, weight_item)
+            
+            qty_item = QTableWidgetItem(str(cargo.quantity))
+            if cargo.is_pallet:
+                qty_item.setBackground(QColor(255, 243, 224))
+            self.cargo_table.setItem(i, 3, qty_item)
             
             # 选项列 - 显示图标表示各种属性
             options = []
+            if cargo.is_pallet:
+                options.append(f"[{len(cargo.pallet_contents)}件]")  # 托盘内货物数
             if cargo.allow_rotate:
                 options.append("🔄")  # 可旋转
             if cargo.bottom_only:
@@ -2973,11 +3073,23 @@ class ContainerLoadingApp(QMainWindow):
                 options.append(f"P{cargo.priority}")  # 优先级
             if cargo.group_id:
                 options.append(f"{cargo.group_id}")  # 分组
-            self.cargo_table.setItem(i, 4, QTableWidgetItem("".join(options)))
-            
-            # 体积列
-            self.cargo_table.setItem(i, 5, QTableWidgetItem(
-                f"{cargo.total_volume/1000000:.2f}"))
+            options_item = QTableWidgetItem("".join(options))
+            if cargo.is_pallet:
+                options_item.setBackground(QColor(255, 243, 224))
+            self.cargo_table.setItem(i, 4, options_item)
+
+            # 新增一列：组托托盘编号
+            pallet_info = ""
+            if hasattr(cargo, "pallet_no") and cargo.pallet_no:
+                pallet_info = f"托盘{cargo.pallet_no}"
+            elif hasattr(cargo, "pallet_of") and cargo.pallet_of:
+                pallet_info = f"托盘{cargo.pallet_of}"
+            pallet_item = QTableWidgetItem(pallet_info)
+            self.cargo_table.setItem(i, 5, pallet_item)
+
+            # 体积列（后移一列）
+            volume_item = QTableWidgetItem(f"{cargo.total_volume/1000000:.2f}")
+            self.cargo_table.setItem(i, 6, volume_item)
         
         # 恢复信号
         self.cargo_table.blockSignals(False)
@@ -3224,6 +3336,41 @@ class ContainerLoadingApp(QMainWindow):
             QMessageBox.warning(self, "警告", "请先添加货物")
             return
         
+        # 创建进度对话框
+        self.loading_progress = QProgressDialog("正在配载中...", "取消", 0, 100, self)
+        self.loading_progress.setWindowTitle("配载进度")
+        self.loading_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.loading_progress.setMinimumDuration(0)
+        self.loading_progress.setAutoClose(True)
+        self.loading_progress.setAutoReset(True)
+        self.loading_progress.setStyleSheet("""
+            QProgressDialog {
+                background-color: #2b2b2b;
+                color: white;
+            }
+            QProgressBar {
+                border: 1px solid #555;
+                border-radius: 5px;
+                background-color: #1e1e1e;
+                text-align: center;
+                color: white;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2196F3, stop:1 #4CAF50);
+                border-radius: 4px;
+            }
+            QPushButton {
+                background-color: #c62828;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+        """)
+        self.loading_progress.setValue(5)
+        self.loading_progress.setLabelText("正在准备配载规则...")
+        QApplication.processEvents()
+        
         # 收集启用的规则
         active_rules = []
         for row in range(self.rules_list.rowCount()):
@@ -3243,9 +3390,16 @@ class ContainerLoadingApp(QMainWindow):
                 elif rule_name == "优先级排序":
                     active_rules.append((priority, RulePriorityFirst()))
         
+        self.loading_progress.setValue(10)
+        self.loading_progress.setLabelText("正在排序配载规则...")
+        QApplication.processEvents()
+        
         # 按优先级排序规则
         active_rules.sort(key=lambda x: x[0], reverse=True)
         rules = [r[1] for r in active_rules]
+        
+        self.loading_progress.setValue(15)
+        QApplication.processEvents()
         
         # 多集装箱模式
         if self.multi_container_mode:
@@ -3255,10 +3409,24 @@ class ContainerLoadingApp(QMainWindow):
     
     def start_single_container_loading(self, rules: list):
         """单集装箱配载"""
+        # 更新进度条
+        self.loading_progress.setValue(20)
+        self.loading_progress.setLabelText("正在初始化配载算法...")
+        QApplication.processEvents()
+        
         # 执行配载
         algorithm = LoadingAlgorithm(self.container, rules=rules, cargo_groups=self.cargo_groups)
+        
+        self.loading_progress.setValue(30)
+        self.loading_progress.setLabelText("正在计算货物放置位置...")
+        QApplication.processEvents()
+        
         loaded, not_loaded = algorithm.load_all(self.cargos)
         
+        self.loading_progress.setValue(70)
+        self.loading_progress.setLabelText("正在生成3D视图...")
+        QApplication.processEvents()
+
         self.placed_cargos = loaded
         self.container_results = []  # 清空多集装箱结果
         self.gl_widget.placed_cargos = loaded
@@ -3296,8 +3464,16 @@ class ContainerLoadingApp(QMainWindow):
         cog_text += f"偏移: 横向 {offset_tuple[0]:.1f}cm, 纵向 {offset_tuple[1]:.1f}cm | 状态: {cog_status}"
         self.cog_label.setText(cog_text)
         
+        self.loading_progress.setValue(85)
+        self.loading_progress.setLabelText("正在生成装载步骤...")
+        QApplication.processEvents()
+        
         # 更新装载步骤表格
         self.update_steps_table(algorithm.get_loading_steps())
+        
+        self.loading_progress.setValue(100)
+        self.loading_progress.setLabelText("配载完成！")
+        QApplication.processEvents()
         
         if not_loaded:
             cargo_names = ", ".join(set(c.name for c in not_loaded))
@@ -3329,10 +3505,24 @@ class ContainerLoadingApp(QMainWindow):
                 single_cargo.id = f"{cargo.id}_{i}"
                 remaining_cargos.append(single_cargo)
         
+        self.loading_progress.setValue(20)
+        self.loading_progress.setLabelText("正在展开货物列表...")
+        QApplication.processEvents()
+        
         # 依次填充每个集装箱
         for container_idx in range(container_count):
             if not remaining_cargos:
                 break
+            
+            # 更新进度
+            progress = 20 + int(60 * (container_idx + 1) / container_count)
+            self.loading_progress.setValue(progress)
+            self.loading_progress.setLabelText(f"正在配载集装箱 {container_idx + 1}/{container_count}...")
+            QApplication.processEvents()
+            
+            if self.loading_progress.wasCanceled():
+                QMessageBox.information(self, "提示", "配载已取消")
+                return
             
             # 创建算法实例
             algorithm = LoadingAlgorithm(self.container, rules=rules)
@@ -3359,6 +3549,10 @@ class ContainerLoadingApp(QMainWindow):
             
             remaining_cargos = still_remaining
         
+        self.loading_progress.setValue(85)
+        self.loading_progress.setLabelText("正在生成3D视图...")
+        QApplication.processEvents()
+        
         # 更新集装箱选择器
         self.container_selector.blockSignals(True)
         self.container_selector.clear()
@@ -3374,6 +3568,10 @@ class ContainerLoadingApp(QMainWindow):
         
         # 设置3D视图为多集装箱模式
         self.gl_widget.set_multi_container_results(self.container_results)
+        
+        self.loading_progress.setValue(100)
+        self.loading_progress.setLabelText("配载完成！")
+        QApplication.processEvents()
         
         # 合并所有装载的货物
         self.placed_cargos = []
@@ -3630,7 +3828,7 @@ class ContainerLoadingApp(QMainWindow):
             self.weight_label.setText(f"{wt_util:.1f}%")
     
     def palletize_cargos(self):
-        """小件组托 - 将小货物组合成托盘"""
+        """小件组托 - 将小货物组合成托盘，使用3D装箱算法"""
         if not self.cargos:
             QMessageBox.warning(self, "警告", "请先添加货物")
             return
@@ -3638,7 +3836,7 @@ class ContainerLoadingApp(QMainWindow):
         # 创建组托对话框
         dialog = QDialog(self)
         dialog.setWindowTitle("小件组托")
-        dialog.setMinimumWidth(400)
+        dialog.setMinimumWidth(500)
         layout = QVBoxLayout(dialog)
         
         # 托盘尺寸选择
@@ -3659,9 +3857,15 @@ class ContainerLoadingApp(QMainWindow):
         pallet_width.setValue(100)
         pallet_layout.addRow("宽度(cm):", pallet_width)
         
+        pallet_base_height = QSpinBox()
+        pallet_base_height.setRange(10, 30)
+        pallet_base_height.setValue(15)
+        pallet_layout.addRow("托盘底座高度(cm):", pallet_base_height)
+        
         max_height = QSpinBox()
         max_height.setRange(50, 300)
         max_height.setValue(150)
+        max_height.setToolTip("包含托盘底座的总高度限制")
         pallet_layout.addRow("最大堆叠高度(cm):", max_height)
         
         max_weight = QSpinBox()
@@ -3687,22 +3891,30 @@ class ContainerLoadingApp(QMainWindow):
         cargo_list = QListWidget()
         cargo_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         for cargo in self.cargos:
-            cargo_list.addItem(f"{cargo.name} - {cargo.length}×{cargo.width}×{cargo.height}cm, {cargo.weight}kg × {cargo.quantity}")
+            # 标记已经是托盘的货物
+            prefix = "📦 " if cargo.is_pallet else ""
+            cargo_list.addItem(f"{prefix}{cargo.name} - {cargo.length}×{cargo.width}×{cargo.height}cm, {cargo.weight}kg × {cargo.quantity}")
         cargo_layout.addWidget(cargo_list)
         
+        btn_row = QHBoxLayout()
         select_all_btn = QPushButton("全选小件(体积<0.1m³)")
         def select_small():
             for i, cargo in enumerate(self.cargos):
-                if cargo.volume < 100000:  # 0.1m³ = 100000 cm³
+                if cargo.volume < 100000 and not cargo.is_pallet:  # 0.1m³ = 100000 cm³
                     cargo_list.item(i).setSelected(True)
         select_all_btn.clicked.connect(select_small)
-        cargo_layout.addWidget(select_all_btn)
+        btn_row.addWidget(select_all_btn)
+        
+        select_none_btn = QPushButton("取消全选")
+        select_none_btn.clicked.connect(lambda: cargo_list.clearSelection())
+        btn_row.addWidget(select_none_btn)
+        cargo_layout.addLayout(btn_row)
         layout.addWidget(cargo_group)
         
         # 按钮
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("开始组托")
-        ok_btn.setStyleSheet("background-color: #2196F3; font-weight: bold;")
+        ok_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 8px 20px;")
         cancel_btn = QPushButton("取消")
         
         ok_btn.clicked.connect(dialog.accept)
@@ -3718,77 +3930,539 @@ class ContainerLoadingApp(QMainWindow):
                 QMessageBox.warning(self, "警告", "请选择要组托的货物")
                 return
             
-            # 执行组托逻辑
+            # 获取托盘参数
             pallet_l = pallet_length.value()
             pallet_w = pallet_width.value()
+            base_h = pallet_base_height.value()
             max_h = max_height.value()
             max_wt = max_weight.value()
+            content_max_h = max_h - base_h  # 货物可用高度
             
-            # 简化的组托算法 - 创建托盘货物
-            palletized_cargos = []
-            remaining_cargos = []
-            
-            current_pallet_cargos = []
-            current_height = 15  # 托盘自身高度
-            current_weight = 0
-            pallet_count = 0
-            
+            # 收集选中的货物（展开数量）
+            selected_cargos = []
             for i, cargo in enumerate(self.cargos):
-                if i in selected_indices:
-                    # 检查是否能放入当前托盘
-                    if (current_height + cargo.height <= max_h and 
-                        current_weight + cargo.total_weight <= max_wt):
-                        for _ in range(cargo.quantity):
-                            current_pallet_cargos.append(cargo)
-                            current_weight += cargo.weight
-                            current_height = min(current_height + cargo.height, max_h)
-                    else:
-                        # 完成当前托盘，开始新托盘
-                        if current_pallet_cargos:
-                            pallet_count += 1
-                            pallet_cargo = Cargo(
-                                name=f"托盘{pallet_count}",
-                                length=pallet_l,
-                                width=pallet_w,
-                                height=current_height,
-                                weight=current_weight,
-                                quantity=1,
-                                stackable=True,
-                                color=self.get_next_color()
-                            )
-                            palletized_cargos.append(pallet_cargo)
-                        
-                        # 重置
-                        current_pallet_cargos = []
-                        current_height = 15 + cargo.height
-                        current_weight = cargo.total_weight
-                        for _ in range(cargo.quantity):
-                            current_pallet_cargos.append(cargo)
-                else:
-                    remaining_cargos.append(cargo)
+                if i in selected_indices and not cargo.is_pallet:
+                    # 展开数量
+                    for _ in range(cargo.quantity):
+                        single_cargo = copy.copy(cargo)
+                        single_cargo.quantity = 1
+                        selected_cargos.append(single_cargo)
+
+            if not selected_cargos:
+                QMessageBox.warning(self, "警告", "没有可组托的货物")
+                return
             
-            # 处理最后一个托盘
-            if current_pallet_cargos:
-                pallet_count += 1
+            # 组托算法
+            palletized_cargos = self._palletize_with_3d_algorithm(
+                selected_cargos, pallet_l, pallet_w, base_h, content_max_h, max_wt
+            )
+
+            # 标记原货物所属托盘
+            for pallet in palletized_cargos:
+                for content in pallet.pallet_contents:
+                    # 在原货物列表中查找对应货物并标记
+                    for cargo in self.cargos:
+                        if (not cargo.is_pallet and cargo.id == content.cargo.id):
+                            cargo.pallet_of = pallet.name.replace("托盘","")  # 托盘编号
+
+            # 显示组托结果，保留原货物信息
+            self._show_palletize_result(palletized_cargos, self.cargos)
+    
+    def _palletize_with_3d_algorithm(self, cargos: List[Cargo], 
+                                      pallet_l: float, pallet_w: float, 
+                                      base_h: float, content_max_h: float, 
+                                      max_wt: float) -> List[Cargo]:
+        """使用3D装箱算法进行组托"""
+        palletized = []
+        remaining = cargos.copy()
+        pallet_count = 0
+        
+        # 按体积从大到小排序
+        remaining.sort(key=lambda c: c.volume, reverse=True)
+        
+        while remaining:
+            pallet_count += 1
+            pallet_contents = []
+            current_weight = 0
+            placed_items = []  # (x, y, z, length, width, height)
+            
+            # 多次遍历剩余货物，直到没有货物能放入当前托盘
+            made_progress = True
+            while made_progress:
+                made_progress = False
+                still_remaining = []
+                
+                for cargo in remaining:
+                    placed = False
+                    
+                    # 尝试不同的放置方式（先不旋转，再旋转）
+                    for rotated in [False, True]:
+                        if not cargo.allow_rotate and rotated:
+                            continue
+                        
+                        c_l = cargo.width if rotated else cargo.length
+                        c_w = cargo.length if rotated else cargo.width
+                        c_h = cargo.height
+                        
+                        # 检查尺寸是否适合托盘
+                        if c_l > pallet_l or c_w > pallet_w or c_h > content_max_h:
+                            continue
+                        
+                        # 检查重量
+                        if current_weight + cargo.weight > max_wt:
+                            continue
+                        
+                        # 寻找可放置位置
+                        position = self._find_position_on_pallet(
+                            placed_items, c_l, c_w, c_h, 
+                            pallet_l, pallet_w, content_max_h
+                        )
+                        
+                        if position:
+                            x, y, z = position
+                            placed_items.append((x, y, z, c_l, c_w, c_h))
+                            current_weight += cargo.weight
+                            
+                            # 记录放置内容
+                            content = PalletContent(
+                                cargo=cargo,
+                                x=x, y=y, z=z,
+                                rotated=rotated,
+                                quantity=1
+                            )
+                            pallet_contents.append(content)
+                            placed = True
+                            made_progress = True  # 有进展，继续循环
+                            break
+                    
+                    if not placed:
+                        still_remaining.append(cargo)
+                
+                remaining = still_remaining
+            
+            # 创建托盘货物
+            if pallet_contents:
+                # 计算实际使用的高度
+                actual_height = base_h
+                for item in placed_items:
+                    item_top = item[2] + item[5]  # z + height
+                    actual_height = max(actual_height, base_h + item_top)
+                
                 pallet_cargo = Cargo(
                     name=f"托盘{pallet_count}",
                     length=pallet_l,
                     width=pallet_w,
-                    height=current_height,
+                    height=actual_height,
                     weight=current_weight,
                     quantity=1,
                     stackable=True,
-                    color=self.get_next_color()
+                    color=self.get_next_color(),
+                    is_pallet=True,
+                    pallet_base_height=base_h,
+                    pallet_contents=pallet_contents,
+                    original_cargos=[c.cargo for c in pallet_contents]
                 )
-                palletized_cargos.append(pallet_cargo)
+                palletized.append(pallet_cargo)
             
+            # 防止无限循环
+            if not pallet_contents and remaining:
+                # 有货物放不进任何托盘
+                QMessageBox.warning(self, "警告", 
+                    f"有 {len(remaining)} 件货物尺寸超过托盘限制，无法组托")
+                break
+        
+        return palletized
+    
+    def _find_position_on_pallet(self, placed_items, c_l, c_w, c_h, 
+                                  pallet_l, pallet_w, max_h) -> Optional[Tuple[float, float, float]]:
+        """在托盘上寻找可放置位置 - 使用底部左下角优先策略"""
+        
+        # 策略：优先填满底层，从左下角开始，逐行逐列扫描
+        # 生成所有可能的放置位置
+        
+        # 1. 收集所有"极限点"（Extreme Points）
+        extreme_points = set()
+        extreme_points.add((0, 0, 0))  # 起始点
+        
+        # 从已放置物品生成极限点
+        for item in placed_items:
+            x, y, z, l, w, h = item
+            # 物品右侧
+            extreme_points.add((x + l, y, z))
+            # 物品前侧  
+            extreme_points.add((x, y + w, z))
+            # 物品顶部
+            extreme_points.add((x, y, z + h))
+            # 组合点
+            extreme_points.add((x + l, y, 0))
+            extreme_points.add((x, y + w, 0))
+            extreme_points.add((x + l, y + w, 0))
+            extreme_points.add((x + l, y + w, z))
+        
+        # 2. 按固定间隔扫描整个托盘底面，确保不遗漏空间
+        # 使用更小的步长确保覆盖所有可能位置
+        scan_step_x = min(c_l / 2, 5)  # 步长为货物长度一半或5cm
+        scan_step_y = min(c_w / 2, 5)  # 步长为货物宽度一半或5cm
+        
+        x = 0
+        while x <= pallet_l - c_l + 0.01:
+            y = 0
+            while y <= pallet_w - c_w + 0.01:
+                extreme_points.add((x, y, 0))
+                y += scan_step_y
+            x += scan_step_x
+        
+        # 3. 对于每个已放物品的顶部，也扫描可堆叠位置
+        for item in placed_items:
+            ix, iy, iz, il, iw, ih = item
+            top_z = iz + ih
+            if top_z + c_h <= max_h + 0.01:
+                # 在该物品顶部扫描
+                sx = ix
+                while sx <= ix + il - c_l + 0.01:
+                    sy = iy
+                    while sy <= iy + iw - c_w + 0.01:
+                        extreme_points.add((sx, sy, top_z))
+                        sy += scan_step_y
+                    sx += scan_step_x
+        
+        # 4. 按优先级排序：先底层，再按y坐标（前后），再按x坐标（左右）
+        candidates = list(extreme_points)
+        candidates.sort(key=lambda p: (p[2], p[1], p[0]))
+        
+        for cx, cy, cz in candidates:
+            # 检查边界
+            if cx < -0.01 or cy < -0.01 or cz < -0.01:
+                continue
+            if cx + c_l > pallet_l + 0.01 or cy + c_w > pallet_w + 0.01 or cz + c_h > max_h + 0.01:
+                continue
+            
+            # 检查与已放置物品的碰撞
+            collision = False
+            for item in placed_items:
+                x, y, z, l, w, h = item
+                # 使用严格的碰撞检测
+                if (cx < x + l and cx + c_l > x and
+                    cy < y + w and cy + c_w > y and
+                    cz < z + h and cz + c_h > z):
+                    collision = True
+                    break
+            
+            if collision:
+                continue
+            
+            # 检查底部支撑（如果不在底层）
+            if cz > 0.01:
+                support = self._check_support(cx, cy, cz, c_l, c_w, placed_items)
+                if not support:
+                    continue
+            
+            return (cx, cy, cz)
+        
+        return None
+    
+    def _check_support(self, x, y, z, l, w, placed_items) -> bool:
+        """检查底部是否有足够支撑"""
+        support_area = 0
+        required_area = l * w * 0.7  # 需要70%的支撑面积
+        
+        for item in placed_items:
+            ix, iy, iz, il, iw, ih = item
+            # 检查是否在正下方
+            if abs(iz + ih - z) < 0.1:  # 顶部接触
+                # 计算重叠面积
+                overlap_x = max(0, min(x + l, ix + il) - max(x, ix))
+                overlap_y = max(0, min(y + w, iy + iw) - max(y, iy))
+                support_area += overlap_x * overlap_y
+        
+        return support_area >= required_area
+    
+    def _show_palletize_result(self, palletized_cargos: List[Cargo], remaining_cargos: List[Cargo]):
+        """显示组托结果对话框"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("组托结果")
+        dialog.setMinimumSize(800, 600)
+        layout = QVBoxLayout(dialog)
+        
+        # 统计信息
+        info_label = QLabel(f"✅ 已生成 {len(palletized_cargos)} 个托盘")
+        info_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2196F3;")
+        layout.addWidget(info_label)
+        
+        # 托盘列表
+        tab_widget = QTabWidget()
+        
+        for i, pallet in enumerate(palletized_cargos):
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            
+            # 托盘信息
+            info = QLabel(f"尺寸: {pallet.length}×{pallet.width}×{pallet.height}cm  |  "
+                         f"重量: {pallet.weight:.1f}kg  |  "
+                         f"内含 {len(pallet.pallet_contents)} 件货物")
+            tab_layout.addWidget(info)
+            
+            # 货物清单
+            content_table = QTableWidget()
+            content_table.setColumnCount(6)
+            content_table.setHorizontalHeaderLabels(["货物名称", "尺寸(cm)", "位置(x,y,z)", "旋转", "重量(kg)", "体积(cm³)"])
+            content_table.setRowCount(len(pallet.pallet_contents))
+            
+            for j, content in enumerate(pallet.pallet_contents):
+                cargo = content.cargo
+                content_table.setItem(j, 0, QTableWidgetItem(cargo.name))
+                content_table.setItem(j, 1, QTableWidgetItem(f"{cargo.length}×{cargo.width}×{cargo.height}"))
+                content_table.setItem(j, 2, QTableWidgetItem(f"({content.x:.0f}, {content.y:.0f}, {content.z:.0f})"))
+                content_table.setItem(j, 3, QTableWidgetItem("是" if content.rotated else "否"))
+                content_table.setItem(j, 4, QTableWidgetItem(f"{cargo.weight:.1f}"))
+                content_table.setItem(j, 5, QTableWidgetItem(f"{cargo.volume:.0f}"))
+            
+            content_table.horizontalHeader().setStretchLastSection(True)
+            tab_layout.addWidget(content_table)
+            
+            # 添加查看3D视图按钮
+            view_btn = QPushButton("🔍 查看托盘3D视图")
+            view_btn.clicked.connect(lambda checked, p=pallet: self._show_pallet_3d_view(p))
+            tab_layout.addWidget(view_btn)
+            
+            tab_widget.addTab(tab, f"托盘{i+1}")
+        
+        layout.addWidget(tab_widget)
+        
+        # 按钮
+        btn_layout = QHBoxLayout()
+        
+        confirm_btn = QPushButton("✅ 确认并应用")
+        confirm_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px 30px;")
+        
+        cancel_btn = QPushButton("❌ 取消")
+        cancel_btn.setStyleSheet("padding: 10px 30px;")
+        
+        def apply_result():
             # 更新货物列表
             self.cargos = remaining_cargos + palletized_cargos
             self.update_cargo_table()
-            
+            dialog.accept()
             QMessageBox.information(self, "组托完成", 
-                f"已将选中货物组成 {pallet_count} 个托盘\n"
-                f"托盘规格: {pallet_l}×{pallet_w}cm")
+                f"已将选中货物组成 {len(palletized_cargos)} 个托盘")
+        
+        confirm_btn.clicked.connect(apply_result)
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        btn_layout.addStretch()
+        btn_layout.addWidget(confirm_btn)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
+    
+    def _show_pallet_3d_view(self, pallet: Cargo):
+        """显示托盘的3D视图"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{pallet.name} - 3D视图")
+        dialog.setMinimumSize(700, 500)
+        layout = QVBoxLayout(dialog)
+        
+        # 创建临时容器用于显示托盘内容
+        temp_container = Container(
+            name=pallet.name,
+            length=pallet.length,
+            width=pallet.width,
+            height=pallet.content_height,  # 不含底座的高度
+            max_weight=pallet.weight * 2
+        )
+        
+        # 创建PlacedCargo列表
+        temp_placed = []
+        for i, content in enumerate(pallet.pallet_contents):
+            placed = PlacedCargo(
+                cargo=content.cargo,
+                x=content.x,
+                y=content.y,
+                z=content.z,
+                rotated=content.rotated,
+                step_number=i + 1
+            )
+            temp_placed.append(placed)
+        
+        # 创建3D视图
+        pallet_view = Container3DView()
+        pallet_view.container = temp_container
+        pallet_view.placed_cargos = temp_placed
+        pallet_view.setMinimumSize(650, 400)
+        layout.addWidget(pallet_view)
+
+        # 视图控制
+        ctrl_layout = QHBoxLayout()
+        for name, preset in [("正视", "front"), ("俯视", "top"), ("等轴", "iso")]:
+            btn = QPushButton(name)
+            btn.clicked.connect(lambda checked, p=preset: pallet_view.set_view(p))
+            ctrl_layout.addWidget(btn)
+
+        # 全屏按钮
+        fullscreen_btn = QPushButton("全屏")
+        fullscreen_btn.setStyleSheet("background-color: #222; color: #fff; font-weight: bold;")
+        ctrl_layout.addWidget(fullscreen_btn)
+        layout.addLayout(ctrl_layout)
+
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        # 全屏切换逻辑
+        def toggle_fullscreen():
+            if dialog.isFullScreen():
+                dialog.showNormal()
+                fullscreen_btn.setText("全屏")
+            else:
+                dialog.showFullScreen()
+                fullscreen_btn.setText("退出全屏")
+        fullscreen_btn.clicked.connect(toggle_fullscreen)
+
+        dialog.exec()
+
+    def show_fullscreen_3d_view(self):
+        """显示全屏3D视图"""
+        if not self.container:
+            QMessageBox.warning(self, "警告", "请先选择集装箱并执行配载")
+            return
+        
+        # 创建全屏对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("3D配载视图 - 全屏模式")
+        dialog.setStyleSheet("background-color: #1e1e1e;")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 创建新的3D视图
+        fullscreen_view = Container3DView()
+        fullscreen_view.container = self.gl_widget.container
+        fullscreen_view.placed_cargos = list(self.gl_widget.placed_cargos) if self.gl_widget.placed_cargos else []
+        fullscreen_view.all_container_results = list(self.gl_widget.all_container_results) if self.gl_widget.all_container_results else []
+        fullscreen_view.current_container_index = self.gl_widget.current_container_index
+        
+        # 多集装箱模式检测 - 只要有container_results就显示切换选项
+        has_container_results = len(fullscreen_view.all_container_results) >= 1
+        
+        layout.addWidget(fullscreen_view, 1)
+        
+        # 控制栏
+        ctrl_layout = QHBoxLayout()
+        
+        # 视图切换按钮
+        views = [("正视", "front"), ("后视", "back"), ("左视", "left"), 
+                 ("右视", "right"), ("俯视", "top"), ("等轴", "iso")]
+        for name, preset in views:
+            btn = QPushButton(name)
+            btn.setStyleSheet("background-color: #333; color: white; padding: 8px 15px; font-weight: bold;")
+            btn.clicked.connect(lambda checked, p=preset: fullscreen_view.set_view(p))
+            ctrl_layout.addWidget(btn)
+        
+        ctrl_layout.addStretch()
+        
+        # 内容切换下拉框
+        container_combo = QComboBox()
+        container_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #333; 
+                color: white; 
+                padding: 8px 15px;
+                min-width: 180px;
+                font-weight: bold;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #333;
+                color: white;
+                selection-background-color: #2196F3;
+            }
+        """)
+        
+        # 添加选项
+        if has_container_results:
+            # 有集装箱结果模式
+            container_combo.addItem("📦 全部概览")
+            for i, result in enumerate(fullscreen_view.all_container_results):
+                util = result.volume_utilization
+                container_combo.addItem(f"📦 集装箱 {i+1} ({util:.1f}%)")
+            container_combo.setCurrentIndex(fullscreen_view.current_container_index + 1)
+        else:
+            # 单集装箱模式（没有container_results的情况）
+            container_combo.addItem(f"📦 {self.container.name}")
+            # 如果有托盘，添加托盘选项
+            pallet_cargos = [p for p in self.placed_cargos if p.cargo.is_pallet]
+            for i, pallet_placed in enumerate(pallet_cargos):
+                container_combo.addItem(f"🎁 {pallet_placed.cargo.name}")
+        
+        def on_content_changed(index):
+            if has_container_results:
+                # 多集装箱模式：切换集装箱
+                fullscreen_view.show_container(index - 1)
+            else:
+                # 单集装箱模式
+                if index == 0:
+                    # 显示集装箱
+                    fullscreen_view.container = self.gl_widget.container
+                    fullscreen_view.placed_cargos = self.gl_widget.placed_cargos.copy()
+                    fullscreen_view.all_container_results = []
+                    fullscreen_view.current_container_index = -1
+                    fullscreen_view.update()
+                else:
+                    # 显示托盘
+                    pallet_cargos = [p for p in self.placed_cargos if p.cargo.is_pallet]
+                    if index - 1 < len(pallet_cargos):
+                        pallet = pallet_cargos[index - 1].cargo
+                        # 创建临时容器显示托盘内容
+                        temp_container = Container(
+                            name=pallet.name,
+                            length=pallet.length,
+                            width=pallet.width,
+                            height=pallet.content_height,
+                            max_weight=pallet.weight * 2
+                        )
+                        temp_placed = []
+                        for j, content in enumerate(pallet.pallet_contents):
+                            placed = PlacedCargo(
+                                cargo=content.cargo,
+                                x=content.x,
+                                y=content.y,
+                                z=content.z,
+                                rotated=content.rotated,
+                                step_number=j + 1
+                            )
+                            temp_placed.append(placed)
+                        fullscreen_view.container = temp_container
+                        fullscreen_view.placed_cargos = temp_placed
+                        fullscreen_view.all_container_results = []
+                        fullscreen_view.current_container_index = -1
+                        fullscreen_view.reset_view()
+        
+        container_combo.currentIndexChanged.connect(on_content_changed)
+        
+        ctrl_layout.addWidget(QLabel("<span style='color:white;'>查看:</span>"))
+        ctrl_layout.addWidget(container_combo)
+        
+        # 重置视图按钮
+        reset_btn = QPushButton("🔄 重置")
+        reset_btn.setStyleSheet("background-color: #333; color: white; padding: 8px 15px;")
+        reset_btn.clicked.connect(fullscreen_view.reset_view)
+        ctrl_layout.addWidget(reset_btn)
+        
+        # 退出全屏按钮
+        exit_btn = QPushButton("✕ 退出全屏")
+        exit_btn.setStyleSheet("background-color: #c62828; color: white; padding: 8px 15px; font-weight: bold;")
+        exit_btn.clicked.connect(dialog.accept)
+        ctrl_layout.addWidget(exit_btn)
+        
+        layout.addLayout(ctrl_layout)
+        
+        # 全屏显示
+        dialog.showFullScreen()
+        dialog.exec()
     
     def load_pallets_to_container(self):
         """装载托盘到集装箱"""
@@ -4387,11 +5061,102 @@ class ContainerLoadingApp(QMainWindow):
         
         elements.append(Spacer(1, 30))
         
+        # 添加组托方案详情
+        pallet_cargos = [p for p in self.placed_cargos if p.cargo.is_pallet and p.cargo.pallet_contents]
+        if pallet_cargos:
+            elements.append(PageBreak())
+            elements.append(Paragraph("六、组托方案详情", heading_style))
+            elements.append(Spacer(1, 10))
+            
+            for pallet_placed in pallet_cargos:
+                pallet = pallet_placed.cargo
+                elements.append(Paragraph(
+                    f"📦 {pallet.name} - 尺寸: {pallet.length}×{pallet.width}×{pallet.height}cm, "
+                    f"重量: {pallet.weight:.1f}kg, 包含 {len(pallet.pallet_contents)} 件货物",
+                    normal_style
+                ))
+                elements.append(Spacer(1, 5))
+                
+                # 组托内容表格
+                pallet_header = ['序号', '货物名称', '尺寸(cm)', '位置(X,Y,Z)', '重量(kg)']
+                pallet_data = [pallet_header]
+                
+                for i, content in enumerate(pallet.pallet_contents, 1):
+                    cargo = content.cargo
+                    pallet_data.append([
+                        str(i),
+                        cargo.name[:12],
+                        f'{cargo.length}×{cargo.width}×{cargo.height}',
+                        f'({content.x:.0f},{content.y:.0f},{content.z:.0f})',
+                        f'{cargo.weight:.1f}'
+                    ])
+                
+                pallet_table = Table(pallet_data, colWidths=[1*cm, 3.5*cm, 3.5*cm, 3.5*cm, 2.5*cm])
+                pallet_table.setStyle(TableStyle([
+                    ('FONTNAME', (0, 0), (-1, -1), 'ChineseFont'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ed8936')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#fed7aa')),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#fffaf0')]),
+                    ('PADDING', (0, 0), (-1, -1), 4),
+                ]))
+                elements.append(pallet_table)
+                elements.append(Spacer(1, 15))
+            
+            # 生成组托等轴测视图
+            if PIL_SUPPORT:
+                for pallet_placed in pallet_cargos[:3]:  # 最多显示3个托盘的视图
+                    pallet = pallet_placed.cargo
+                    try:
+                        # 创建临时容器用于生成托盘视图
+                        temp_container = Container(
+                            name=pallet.name,
+                            length=pallet.length,
+                            width=pallet.width,
+                            height=pallet.content_height,
+                            max_weight=pallet.weight * 2
+                        )
+                        
+                        temp_placed = []
+                        for i, content in enumerate(pallet.pallet_contents):
+                            placed = PlacedCargo(
+                                cargo=content.cargo,
+                                x=content.x,
+                                y=content.y,
+                                z=content.z,
+                                rotated=content.rotated,
+                                step_number=i + 1
+                            )
+                            temp_placed.append(placed)
+                        
+                        pallet_generator = LoadingImageGenerator(temp_container, temp_placed)
+                        pallet_img = pallet_generator._generate_isometric_view_pil(400, 300)
+                        
+                        if pallet_img:
+                            import tempfile
+                            tmp_dir = os.path.dirname(filename) or tempfile.gettempdir()
+                            pallet_tmp_path = os.path.join(tmp_dir, f"_temp_pallet_{pallet.name}_{id(self)}.png")
+                            pallet_img.save(pallet_tmp_path)
+                            
+                            elements.append(Paragraph(f"{pallet.name} 组托示意图:", normal_style))
+                            elements.append(RLImage(pallet_tmp_path, width=12*cm, height=9*cm))
+                            elements.append(Spacer(1, 10))
+                            
+                            # 记录临时文件用于清理
+                            if not hasattr(self, '_temp_pallet_files'):
+                                self._temp_pallet_files = []
+                            self._temp_pallet_files.append(pallet_tmp_path)
+                    except Exception as e:
+                        elements.append(Paragraph(f"托盘视图生成失败: {str(e)}", normal_style))
+        
         # 尝试添加装载图
+        section_num = "七" if pallet_cargos else "六"
         tmp_path = None
         if PIL_SUPPORT:
             elements.append(PageBreak())
-            elements.append(Paragraph("六、装载示意图", heading_style))
+            elements.append(Paragraph(f"{section_num}、装载示意图", heading_style))
             
             try:
                 # 生成等轴测视图
@@ -4419,6 +5184,16 @@ class ContainerLoadingApp(QMainWindow):
                 os.remove(tmp_path)
             except:
                 pass
+        
+        # 清理组托临时文件
+        if hasattr(self, '_temp_pallet_files'):
+            for pallet_path in self._temp_pallet_files:
+                if os.path.exists(pallet_path):
+                    try:
+                        os.remove(pallet_path)
+                    except:
+                        pass
+            self._temp_pallet_files = []
 
     def get_securing_advice(self, placed_cargo, index: int, total: int) -> str:
         """获取单个货物的加固建议"""
@@ -4569,13 +5344,19 @@ class ContainerLoadingApp(QMainWindow):
         cargo = placed.cargo
         
         # 基本信息
-        self.cargo_name_label.setText(f"名称: {cargo.name}")
+        pallet_indicator = " 📦[组托]" if cargo.is_pallet else ""
+        self.cargo_name_label.setText(f"名称: {cargo.name}{pallet_indicator}")
         if placed.rotated:
             self.cargo_size_label.setText(f"尺寸: {cargo.width} × {cargo.length} × {cargo.height} cm (已旋转)")
         else:
             self.cargo_size_label.setText(f"尺寸: {cargo.length} × {cargo.width} × {cargo.height} cm")
         self.cargo_weight_label.setText(f"重量: {cargo.weight:.1f} kg")
-        self.cargo_stackable_label.setText(f"可堆叠: {'是' if cargo.stackable else '否'}")
+        
+        # 如果是托盘，显示包含的货物信息
+        if cargo.is_pallet and cargo.pallet_contents:
+            self.cargo_stackable_label.setText(f"包含货物: {len(cargo.pallet_contents)} 件")
+        else:
+            self.cargo_stackable_label.setText(f"可堆叠: {'是' if cargo.stackable else '否'}")
         
         # 位置信息
         self.cargo_pos_label.setText(f"位置: X={placed.x:.0f}, Y={placed.y:.0f}, Z={placed.z:.0f} cm")
@@ -4607,8 +5388,21 @@ class ContainerLoadingApp(QMainWindow):
         securing = self.get_securing_advice(placed, index, len(self.placed_cargos))
         self.cargo_securing_label.setText(f"加固建议: {securing}")
         
+        # 更新托盘详情按钮可见性
+        if hasattr(self, 'view_pallet_btn'):
+            self.view_pallet_btn.setVisible(cargo.is_pallet and len(cargo.pallet_contents) > 0)
+            self._selected_pallet_index = index  # 保存选中的托盘索引
+        
         # 更新标题
-        self.selected_cargo_group.setTitle(f"📦 选中货物信息 - 第 {index + 1} 件 / 共 {len(self.placed_cargos)} 件")
+        pallet_mark = " [组托]" if cargo.is_pallet else ""
+        self.selected_cargo_group.setTitle(f"📦 选中货物信息{pallet_mark} - 第 {index + 1} 件 / 共 {len(self.placed_cargos)} 件")
+    
+    def show_selected_pallet_details(self):
+        """显示选中托盘的详情"""
+        if hasattr(self, '_selected_pallet_index') and 0 <= self._selected_pallet_index < len(self.placed_cargos):
+            pallet = self.placed_cargos[self._selected_pallet_index].cargo
+            if pallet.is_pallet:
+                self._show_pallet_3d_view(pallet)
     
     def on_cargo_drag_moved(self, index: int):
         """货物被拖拽移动后"""
@@ -4667,6 +5461,175 @@ class ContainerLoadingApp(QMainWindow):
                 QMessageBox.warning(self, "警告", "图片生成失败")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出失败: {e}")
+
+    def show_user_manual(self):
+        """显示使用手册"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📖 使用手册")
+        dialog.setMinimumSize(700, 600)
+        dialog.setStyleSheet("background-color: #1e1e1e;")
+        
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # 创建滚动区域
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #252525;
+            }
+            QScrollBar:vertical {
+                background-color: #1e1e1e;
+                width: 12px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #3d3d3d;
+                border-radius: 6px;
+            }
+        """)
+        
+        # 手册内容
+        content = QLabel()
+        content.setWordWrap(True)
+        content.setOpenExternalLinks(True)
+        content.setStyleSheet("""
+            QLabel {
+                color: #e0e0e0;
+                font-size: 14px;
+                line-height: 1.6;
+                padding: 20px;
+                background-color: #252525;
+            }
+        """)
+        
+        manual_html = """
+        <h1 style="color: #81D4FA; text-align: center;">📦 集装箱配载软件使用手册</h1>
+        <hr style="border-color: #3d3d3d;">
+        
+        <h2 style="color: #4FC3F7;">🚀 快速开始</h2>
+        <ol>
+            <li><b>选择集装箱</b>：左侧面板选择容器类别和型号</li>
+            <li><b>添加货物</b>：输入货物名称、尺寸、重量、数量，点击"添加到列表"</li>
+            <li><b>执行配载</b>：点击"执行配载"按钮，自动计算最优装载方案</li>
+            <li><b>查看结果</b>：在3D视图中查看装载效果</li>
+        </ol>
+        
+        <h2 style="color: #4FC3F7;">📋 功能说明</h2>
+        
+        <h3 style="color: #81D4FA;">1. 容器选择</h3>
+        <ul>
+            <li><b>标准集装箱</b>：20GP、40GP、40HC等国际标准集装箱</li>
+            <li><b>托盘</b>：标准托盘、欧标托盘等</li>
+            <li><b>自定义容器</b>：可自定义任意尺寸的容器</li>
+        </ul>
+        
+        <h3 style="color: #81D4FA;">2. 货物管理</h3>
+        <ul>
+            <li><b>添加货物</b>：手动输入或从Excel导入</li>
+            <li><b>编辑货物</b>：双击货物列表中的单元格可直接编辑</li>
+            <li><b>删除货物</b>：选中行后点击"删除选中"按钮</li>
+            <li><b>可旋转</b>：勾选后货物可在XY平面旋转90度</li>
+        </ul>
+        
+        <h3 style="color: #81D4FA;">3. 配载规则</h3>
+        <ul>
+            <li><b>允许堆叠</b>：货物是否可以堆叠放置</li>
+            <li><b>重不压轻</b>：重货放下层，轻货放上层</li>
+            <li><b>堆叠层数限制</b>：限制最大堆叠层数</li>
+            <li><b>支撑比例</b>：上层货物需要的底部支撑面积比例</li>
+        </ul>
+        
+        <h3 style="color: #81D4FA;">4. 两步装载（推荐用于小件）</h3>
+        <ol>
+            <li><b>第一步：货物组托</b> - 将小箱先组合到托盘上</li>
+            <li><b>第二步：托盘装柜</b> - 将托盘装入集装箱</li>
+        </ol>
+        <p style="color: #FFEB3B;">💡 提示：组托功能适合大量小件货物，可提高装载效率和叉车操作便利性</p>
+        
+        <h3 style="color: #81D4FA;">5. 多集装箱模式</h3>
+        <ul>
+            <li>当货物超出单个集装箱容量时，自动使用多个集装箱</li>
+            <li>可设置使用的集装箱数量</li>
+            <li>使用下拉框切换查看不同集装箱或全部概览</li>
+        </ul>
+        
+        <h2 style="color: #4FC3F7;">🎮 3D视图操作</h2>
+        <table style="width:100%; border-collapse: collapse;">
+            <tr style="background-color: #333;">
+                <td style="padding: 10px; border: 1px solid #555;"><b>鼠标左键拖动</b></td>
+                <td style="padding: 10px; border: 1px solid #555;">旋转视图</td>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #555;"><b>鼠标右键拖动</b></td>
+                <td style="padding: 10px; border: 1px solid #555;">平移视图</td>
+            </tr>
+            <tr style="background-color: #333;">
+                <td style="padding: 10px; border: 1px solid #555;"><b>鼠标滚轮</b></td>
+                <td style="padding: 10px; border: 1px solid #555;">缩放视图</td>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #555;"><b>点击货物</b></td>
+                <td style="padding: 10px; border: 1px solid #555;">选中并查看货物信息</td>
+            </tr>
+            <tr style="background-color: #333;">
+                <td style="padding: 10px; border: 1px solid #555;"><b>预设视图</b></td>
+                <td style="padding: 10px; border: 1px solid #555;">正视/后视/左视/右视/俯视/等轴</td>
+            </tr>
+        </table>
+        
+        <h2 style="color: #4FC3F7;">📤 导出功能</h2>
+        <ul>
+            <li><b>导出方案</b>：导出PDF或Excel格式的装载报告</li>
+            <li><b>导出图片</b>：导出3D视图截图</li>
+        </ul>
+        
+        <h2 style="color: #4FC3F7;">💾 数据导入</h2>
+        <ul>
+            <li><b>从Excel导入</b>：支持批量导入货物数据</li>
+            <li>Excel格式要求：名称、长度(cm)、宽度(cm)、高度(cm)、重量(kg)、数量</li>
+        </ul>
+        
+        <h2 style="color: #4FC3F7;">⌨️ 快捷键</h2>
+        <table style="width:100%; border-collapse: collapse;">
+            <tr style="background-color: #333;">
+                <td style="padding: 8px; border: 1px solid #555;"><b>Enter</b></td>
+                <td style="padding: 8px; border: 1px solid #555;">添加货物到列表</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px; border: 1px solid #555;"><b>Delete</b></td>
+                <td style="padding: 8px; border: 1px solid #555;">删除选中货物</td>
+            </tr>
+        </table>
+        
+        <hr style="border-color: #3d3d3d; margin-top: 30px;">
+        <p style="text-align: center; color: #9e9e9e;">集装箱配载软件 v0.5 - by Henry Xue</p>
+        """
+        
+        content.setText(manual_html)
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                padding: 10px 30px;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        dialog.exec()
 
 
 def main():
