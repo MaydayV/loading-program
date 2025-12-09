@@ -71,7 +71,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QSplitter, QFrame, QSpinBox,
     QDoubleSpinBox, QStyle, QStyleFactory, QScrollArea,
     QDialog, QGridLayout, QFormLayout, QListWidget, QTabWidget,
-    QProgressDialog
+    QProgressDialog, QTextEdit
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
@@ -2999,65 +2999,67 @@ class ContainerLoadingApp(QMainWindow):
         # 第二行：微调按钮
         drag_row2 = QHBoxLayout()
         
-        fine_tune_label = QLabel("微调位置:")
+        fine_tune_label = QLabel("微调:")
         fine_tune_label.setStyleSheet("color: #B0BEC5; font-size: 11px;")
+        fine_tune_label.setFixedWidth(35)
         drag_row2.addWidget(fine_tune_label)
         
         # X 方向
-        btn_x_minus = ModernButton("◀ X")
-        btn_x_minus.setFixedWidth(50)
+        btn_x_minus = ModernButton("-X")
+        btn_x_minus.setFixedSize(36, 28)
         btn_x_minus.clicked.connect(lambda: self.fine_tune_cargo(-1, 0, 0))
         btn_x_minus.setToolTip("X方向负向移动")
         drag_row2.addWidget(btn_x_minus)
         
-        btn_x_plus = ModernButton("X ▶")
-        btn_x_plus.setFixedWidth(50)
+        btn_x_plus = ModernButton("+X")
+        btn_x_plus.setFixedSize(36, 28)
         btn_x_plus.clicked.connect(lambda: self.fine_tune_cargo(1, 0, 0))
         btn_x_plus.setToolTip("X方向正向移动")
         drag_row2.addWidget(btn_x_plus)
         
-        drag_row2.addSpacing(10)
+        drag_row2.addSpacing(5)
         
         # Y 方向
-        btn_y_minus = ModernButton("◀ Y")
-        btn_y_minus.setFixedWidth(50)
+        btn_y_minus = ModernButton("-Y")
+        btn_y_minus.setFixedSize(36, 28)
         btn_y_minus.clicked.connect(lambda: self.fine_tune_cargo(0, -1, 0))
         btn_y_minus.setToolTip("Y方向负向移动")
         drag_row2.addWidget(btn_y_minus)
         
-        btn_y_plus = ModernButton("Y ▶")
-        btn_y_plus.setFixedWidth(50)
+        btn_y_plus = ModernButton("+Y")
+        btn_y_plus.setFixedSize(36, 28)
         btn_y_plus.clicked.connect(lambda: self.fine_tune_cargo(0, 1, 0))
         btn_y_plus.setToolTip("Y方向正向移动")
         drag_row2.addWidget(btn_y_plus)
         
-        drag_row2.addSpacing(10)
+        drag_row2.addSpacing(5)
         
         # Z 方向
-        btn_z_minus = ModernButton("▼ Z")
-        btn_z_minus.setFixedWidth(50)
+        btn_z_minus = ModernButton("-Z")
+        btn_z_minus.setFixedSize(36, 28)
         btn_z_minus.clicked.connect(lambda: self.fine_tune_cargo(0, 0, -1))
         btn_z_minus.setToolTip("Z方向向下移动")
         drag_row2.addWidget(btn_z_minus)
         
-        btn_z_plus = ModernButton("Z ▲")
-        btn_z_plus.setFixedWidth(50)
+        btn_z_plus = ModernButton("+Z")
+        btn_z_plus.setFixedSize(36, 28)
         btn_z_plus.clicked.connect(lambda: self.fine_tune_cargo(0, 0, 1))
         btn_z_plus.setToolTip("Z方向向上移动")
         drag_row2.addWidget(btn_z_plus)
         
-        drag_row2.addSpacing(15)
+        drag_row2.addSpacing(10)
         
         # 步进选择
         step_label = QLabel("步进:")
         step_label.setStyleSheet("color: #B0BEC5; font-size: 11px;")
+        step_label.setFixedWidth(35)
         drag_row2.addWidget(step_label)
         
         self.step_size_combo = QComboBox()
-        self.step_size_combo.addItems(["1 cm", "5 cm", "10 cm", "20 cm"])
+        self.step_size_combo.addItems(["1cm", "5cm", "10cm", "20cm"])
         self.step_size_combo.setCurrentIndex(0)
         self.step_size_combo.setToolTip("设置微调按钮的移动距离")
-        self.step_size_combo.setFixedWidth(70)
+        self.step_size_combo.setFixedWidth(60)
         drag_row2.addWidget(self.step_size_combo)
         
         drag_row2.addStretch()
@@ -5950,7 +5952,8 @@ class ContainerLoadingApp(QMainWindow):
         """微调货物位置"""
         # 获取步进大小
         step_text = self.step_size_combo.currentText()
-        step = float(step_text.split()[0])  # 提取数字部分
+        # 提取数字部分 (支持 "1cm" 或 "1 cm" 格式)
+        step = float(''.join(c for c in step_text if c.isdigit() or c == '.'))
         
         if self.gl_widget.move_selected_cargo(dx * step, dy * step, dz * step):
             # 更新显示信息
