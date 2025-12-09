@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-集装箱配载软件 (Container Loading Software) v0.5
+集装箱配载软件 (Container Loading Software) v0.6
 使用 PyQt6 + OpenGL 实现可拖动旋转的3D视图
 支持多集装箱、装载图导出、拖拽调整等高级功能
 
 作者: Henry Xue
-版本: 0.5
+版本: 0.6
 """
 
 import sys
