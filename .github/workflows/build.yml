@@ -50,25 +50,17 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name "ContainerLoading" --icon=assets/icon.ico --clean container_loading_modern.py
 
-      - name: Create distributable package
-        run: |
-          mkdir package
-          copy dist\ContainerLoading.exe package\
-          copy README.md package\
-          copy CHANGELOG.md package\
-          copy FEATURES.md package\
-
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: ContainerLoading-Windows
-          path: package/
+          path: dist/ContainerLoading.exe
 
       - name: Release - Windows
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
-          files: package/ContainerLoading.exe
+          files: dist/ContainerLoading.exe
           draft: false
           prerelease: false
 
@@ -106,7 +98,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name "ContainerLoading" --icon=assets/icon.icns --clean container_loading_modern.py
+          pyinstaller --onefile --windowed --name "ContainerLoading" --icon=assets/icon.png --clean container_loading_modern.py
 
       - name: Create macOS app bundle
         run: |
@@ -149,8 +141,20 @@ jobs:
           </plist>
           EOF
 
-          # 复制图标
-          cp assets/icon.icns ContainerLoading.app/Contents/Resources/AppIcon.icns
+          # 生成 icns 图标
+          mkdir -p icon.iconset
+          sips -z 16 16     assets/icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     assets/icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     assets/icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   assets/icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   assets/icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/icon.png --out icon.iconset/icon_512x512.png
+          sips -z 1024 1024 assets/icon.png --out icon.iconset/icon_512x512@2x.png
+          iconutil -c icns icon.iconset -o ContainerLoading.app/Contents/Resources/AppIcon.icns
+          rm -rf icon.iconset
 
       - name: Create DMG
         run: |
@@ -163,13 +167,9 @@ jobs:
           # 创建符号链接到Applications
           ln -s /Applications dmg_temp/Applications
 
-          # 复制文档
-          cp README.md dmg_temp/
-          cp CHANGELOG.md dmg_temp/
-          cp FEATURES.md dmg_temp/
-
           # 创建DMG
           hdiutil create -volname "ContainerLoading" -srcfolder dmg_temp -ov -format UDZO ContainerLoading.dmg
+          rm -rf dmg_temp
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
