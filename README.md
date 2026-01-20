@@ -28,7 +28,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/yourusername/container-loading.git
+git clone https://github.com/findhappyman/container-loading.git
 cd container-loading
 
 # 安装依赖
