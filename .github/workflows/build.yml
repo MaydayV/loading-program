@@ -1,5 +1,8 @@
 name: Build Application
 
+permissions:
+  contents: write
+
 on:
   push:
     branches:
