@@ -135,6 +135,9 @@ jobs:
           plutil -convert xml1 "dist/集装箱配载模拟器.app/Contents/Info.plist"
           chmod 644 "dist/集装箱配载模拟器.app/Contents/Info.plist"
 
+          # Ad-hoc 签名，避免 macOS 提示"应用已损坏"
+          codesign --force --deep --sign - "dist/集装箱配载模拟器.app"
+
       - name: Create DMG
         run: |
           export LANG=zh_CN.UTF-8

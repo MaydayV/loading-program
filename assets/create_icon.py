@@ -16,13 +16,13 @@ SIZES = [16, 32, 48, 64, 128, 256, 512, 1024]
 
 def create_icon(size):
     """创建指定尺寸的图标"""
-    # 创建白色背景
-    img = Image.new('RGBA', (size, size), (255, 255, 255, 255))
+    # 创建透明背景
+    img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     # 绘制网格
     grid_spacing = max(size // 8, 4)
-    grid_color = (220, 220, 220, 255)
+    grid_color = (220, 220, 220, 80)
 
     # 垂直线
     for x in range(0, size, grid_spacing):
