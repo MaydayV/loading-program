@@ -17,6 +17,13 @@ from typing import List, Optional, Tuple, Dict
 import copy
 import io
 import os
+import re
+import threading
+import webbrowser
+import urllib.request
+
+VERSION = "0.6.0"
+GITHUB_REPO = "MaydayV/loading-program"
 
 try:
     from openpyxl import Workbook, load_workbook
@@ -2572,7 +2579,48 @@ class ContainerLoadingApp(QMainWindow):
         self.setup_style()
         self.setup_ui()
         self.setup_default_container()
-    
+
+        # 启动时检测更新
+        QTimer.singleShot(1000, self.check_for_updates)
+
+    @staticmethod
+    def _parse_version(v: str) -> tuple:
+        """解析版本字符串为可比较的元组"""
+        v = v.strip().lstrip("v")
+        parts = re.findall(r"\d+", v)
+        return tuple(int(p) for p in parts)
+
+    def check_for_updates(self):
+        """后台检测 GitHub 最新版本"""
+        def _check():
+            try:
+                url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+                req = urllib.request.Request(url)
+                req.add_header("Accept", "application/vnd.github+json")
+                req.add_header("User-Agent", "ContainerLoadingSimulator")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    latest_tag = data.get("tag_name", "")
+                    if latest_tag and self._parse_version(latest_tag) > self._parse_version(VERSION):
+                        self._on_update_available(latest_tag)
+            except Exception:
+                pass  # 网络异常时静默忽略
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _on_update_available(self, latest_version: str):
+        """在主线程显示更新提示"""
+        def _show():
+            self.update_banner.setText(
+                f"🔔 发现新版本 {latest_version}（当前 {VERSION}）— 点击前往下载"
+            )
+            self.update_banner.setVisible(True)
+        QTimer.singleShot(0, _show)
+
+    def _open_releases_page(self):
+        """打开 GitHub Releases 页面"""
+        webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases")
+
     def setup_style(self):
         """设置应用样式"""
         self.setStyleSheet("""
@@ -2694,10 +2742,40 @@ class ContainerLoadingApp(QMainWindow):
         """设置界面"""
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        wrapper = QVBoxLayout(central)
+        wrapper.setSpacing(0)
+        wrapper.setContentsMargins(0, 0, 0, 0)
+
+        # 更新提示横幅
+        self.update_banner = QPushButton()
+        self.update_banner.setVisible(False)
+        self.update_banner.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_banner.setStyleSheet("""
+            QPushButton {
+                background-color: #1565C0;
+                color: white;
+                border: none;
+                border-radius: 0px;
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: bold;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
+        self.update_banner.clicked.connect(self._open_releases_page)
+        wrapper.addWidget(self.update_banner)
+
+        main_layout = QHBoxLayout()
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(15, 15, 15, 15)
-        
+        wrapper.addLayout(main_layout)
+
         # 左侧面板 - 设置适当宽度确保内容完整显示
         left_panel = QWidget()
         left_panel.setMinimumWidth(480)
