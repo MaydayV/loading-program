@@ -51,19 +51,19 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name "ContainerLoading" --icon=assets/icon.ico --clean container_loading_modern.py
+          pyinstaller --onefile --windowed --name "ContainerLoadingSimulator" --icon=assets/icon.ico --clean container_loading_modern.py
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ContainerLoading-Windows
-          path: dist/ContainerLoading.exe
+          name: ContainerLoadingSimulator-Windows
+          path: dist/ContainerLoadingSimulator.exe
 
       - name: Release - Windows
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/ContainerLoading.exe
+          files: dist/ContainerLoadingSimulator.exe
           draft: false
           prerelease: false
 
@@ -116,14 +116,14 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onedir --windowed --name "ContainerLoading" --icon=assets/icon_build.icns --clean container_loading_modern.py
+          pyinstaller --onedir --windowed --name "ContainerLoadingSimulator" --icon=assets/icon_build.icns --clean container_loading_modern.py
 
       - name: Fix Info.plist encoding
         run: |
           # 确保 Info.plist 使用 UTF-8 编码
-          plutil -convert xml1 dist/ContainerLoading.app/Contents/Info.plist
+          plutil -convert xml1 dist/ContainerLoadingSimulator.app/Contents/Info.plist
           # 设置正确的文件权限
-          chmod 644 dist/ContainerLoading.app/Contents/Info.plist
+          chmod 644 dist/ContainerLoadingSimulator.app/Contents/Info.plist
 
       - name: Create DMG
         run: |
@@ -135,31 +135,31 @@ jobs:
           mkdir -p dmg_temp
 
           # 复制.app到DMG目录
-          cp -R dist/ContainerLoading.app dmg_temp/
+          cp -R dist/ContainerLoadingSimulator.app dmg_temp/
 
           # 创建符号链接到Applications
           ln -s /Applications dmg_temp/Applications
 
           # 创建DMG，使用HFS+文件系统支持中文
-          hdiutil create -volname "ContainerLoading" \
+          hdiutil create -volname "ContainerLoadingSimulator" \
             -srcfolder dmg_temp \
             -ov -format UDZO \
             -fs HFS+ \
             -fsargs "-c c=64,a=16,e=16" \
-            ContainerLoading.dmg
+            ContainerLoadingSimulator.dmg
 
           rm -rf dmg_temp
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ContainerLoading-macOS
-          path: ContainerLoading.dmg
+          name: ContainerLoadingSimulator-macOS
+          path: ContainerLoadingSimulator.dmg
 
       - name: Release - macOS
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
-          files: ContainerLoading.dmg
+          files: ContainerLoadingSimulator.dmg
           draft: false
           prerelease: false

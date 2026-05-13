@@ -1,8 +1,8 @@
 #!/bin/bash
-# 集装箱配载软件 - Linux 打包脚本
+# 集装箱配载模拟器 - Linux 打包脚本
 
 echo "========================================"
-echo "  集装箱配载软件 - Linux 打包脚本"
+echo "  集装箱配载模拟器 - Linux 打包脚本"
 echo "========================================"
 echo ""
 
@@ -30,16 +30,16 @@ pip install -r requirements.txt
 
 echo ""
 echo "[4/4] 开始打包..."
-pyinstaller --onefile --windowed --name "ContainerLoading" --icon=assets/icon.png --clean container_loading_modern.py
+pyinstaller --onefile --windowed --name "ContainerLoadingSimulatorSimulator" --icon=assets/icon.png --clean container_loading_modern.py
 
 echo ""
 echo "========================================"
-if [ -f "dist/ContainerLoading" ]; then
+if [ -f "dist/ContainerLoadingSimulator" ]; then
     echo "✓ 打包完成！"
     echo ""
-    echo "可执行文件位置: dist/ContainerLoading"
+    echo "可执行文件位置: dist/ContainerLoadingSimulator"
     echo ""
-    ls -lh dist/ContainerLoading
+    ls -lh dist/ContainerLoadingSimulator
 else
     echo "✗ 打包失败，请检查错误信息"
 fi

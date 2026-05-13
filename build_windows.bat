@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 > nul
 echo ========================================
-echo   集装箱配载软件 - Windows 打包脚本
+echo   集装箱配载模拟器 - Windows 打包脚本
 echo ========================================
 echo.
 
@@ -30,16 +30,16 @@ pip install -r requirements.txt
 
 echo.
 echo [4/4] 开始打包...
-pyinstaller --onefile --windowed --name "ContainerLoading" --icon=assets/icon.ico --clean container_loading_modern.py
+pyinstaller --onefile --windowed --name "ContainerLoadingSimulator" --icon=assets/icon.ico --clean container_loading_modern.py
 
 echo.
 echo ========================================
-if exist "dist\ContainerLoading.exe" (
+if exist "dist\ContainerLoadingSimulator.exe" (
     echo ✓ 打包完成！
     echo.
-    echo 可执行文件位置: dist\ContainerLoading.exe
+    echo 可执行文件位置: dist\ContainerLoadingSimulator.exe
     echo.
-    dir dist\ContainerLoading.exe
+    dir dist\ContainerLoadingSimulator.exe
 ) else (
     echo ✗ 打包失败，请检查错误信息
 )

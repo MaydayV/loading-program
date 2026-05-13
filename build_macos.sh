@@ -1,8 +1,8 @@
 #!/bin/bash
-# 集装箱配载软件 - macOS 打包脚本
+# 集装箱配载模拟器 - macOS 打包脚本
 
 echo "========================================"
-echo "  集装箱配载软件 - macOS 打包脚本"
+echo "  集装箱配载模拟器 - macOS 打包脚本"
 echo "========================================"
 echo ""
 
@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 echo ""
 echo "[4/6] 开始打包..."
-pyinstaller --onefile --windowed --name "ContainerLoading" --icon=assets/icon.icns --clean container_loading_modern.py
+pyinstaller --onefile --windowed --name "ContainerLoadingSimulator" --icon=assets/icon.icns --clean container_loading_modern.py
 
 if [ $? -ne 0 ]; then
     echo ""
@@ -44,26 +44,26 @@ echo ""
 echo "[5/6] 创建 macOS app bundle..."
 
 # 创建.app结构
-mkdir -p ContainerLoading.app/Contents/MacOS
-mkdir -p ContainerLoading.app/Contents/Resources
+mkdir -p ContainerLoadingSimulator.app/Contents/MacOS
+mkdir -p ContainerLoadingSimulator.app/Contents/Resources
 
 # 复制可执行文件
-cp dist/ContainerLoading ContainerLoading.app/Contents/MacOS/
+cp dist/ContainerLoadingSimulator ContainerLoadingSimulator.app/Contents/MacOS/
 
 # 创建Info.plist
-cat > ContainerLoading.app/Contents/Info.plist << 'EOF'
+cat > ContainerLoadingSimulator.app/Contents/Info.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>ContainerLoading</string>
+    <string>ContainerLoadingSimulator</string>
     <key>CFBundleIdentifier</key>
     <string>com.containerloading.app</string>
     <key>CFBundleName</key>
-    <string>ContainerLoading</string>
+    <string>ContainerLoadingSimulator</string>
     <key>CFBundleDisplayName</key>
-    <string>集装箱配载软件</string>
+    <string>集装箱配载模拟器</string>
     <key>CFBundleVersion</key>
     <string>1.0.0</string>
     <key>CFBundleShortVersionString</key>
@@ -86,7 +86,7 @@ EOF
 
 # 复制图标
 if [ -f "assets/icon.icns" ]; then
-    cp assets/icon.icns ContainerLoading.app/Contents/Resources/AppIcon.icns
+    cp assets/icon.icns ContainerLoadingSimulator.app/Contents/Resources/AppIcon.icns
 fi
 
 echo ""
@@ -97,7 +97,7 @@ rm -rf dmg_temp
 mkdir -p dmg_temp
 
 # 复制.app到DMG目录
-cp -R ContainerLoading.app dmg_temp/
+cp -R ContainerLoadingSimulator.app dmg_temp/
 
 # 创建符号链接到Applications
 ln -s /Applications dmg_temp/Applications
@@ -108,22 +108,22 @@ cp CHANGELOG.md dmg_temp/ 2>/dev/null || true
 cp FEATURES.md dmg_temp/ 2>/dev/null || true
 
 # 创建DMG
-hdiutil create -volname "ContainerLoading" -srcfolder dmg_temp -ov -format UDZO ContainerLoading.dmg
+hdiutil create -volname "ContainerLoadingSimulator" -srcfolder dmg_temp -ov -format UDZO ContainerLoadingSimulator.dmg
 
 # 清理临时目录
 rm -rf dmg_temp
 
 echo ""
 echo "========================================"
-if [ -f "ContainerLoading.dmg" ]; then
+if [ -f "ContainerLoadingSimulator.dmg" ]; then
     echo "✓ 打包完成！"
     echo ""
     echo "生成的文件:"
-    echo "  - dist/ContainerLoading (可执行文件)"
-    echo "  - ContainerLoading.app (应用包)"
-    echo "  - ContainerLoading.dmg (安装包)"
+    echo "  - dist/ContainerLoadingSimulator (可执行文件)"
+    echo "  - ContainerLoadingSimulator.app (应用包)"
+    echo "  - ContainerLoadingSimulator.dmg (安装包)"
     echo ""
-    ls -lh ContainerLoading.dmg ContainerLoading.app
+    ls -lh ContainerLoadingSimulator.dmg ContainerLoadingSimulator.app
 else
     echo "✗ 打包失败"
 fi

@@ -1,4 +1,4 @@
-# 集装箱配载软件 (Container Loading Software)
+# 集装箱配载模拟器 (Container Loading Simulator)
 
 一个现代化的集装箱货物配载优化软件，使用 PyQt6 + OpenGL 实现可交互的3D可视化界面。
 
@@ -40,7 +40,7 @@ python container_loading_modern.py
 
 ### 方式二：运行可执行文件
 
-下载 `dist/集装箱配载软件.exe` 直接运行（仅Windows）
+下载 `dist/集装箱配载模拟器.exe` 直接运行（仅Windows）
 
 ## 📦 依赖库
 
@@ -67,7 +67,7 @@ python container_loading_modern.py
 
 ```bash
 pip install pyinstaller
-pyinstaller --name="集装箱配载软件" --windowed --onefile container_loading_modern.py
+pyinstaller --name="集装箱配载模拟器" --windowed --onefile container_loading_modern.py
 ```
 
 ## 📄 许可证

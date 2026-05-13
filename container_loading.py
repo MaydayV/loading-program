@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-集装箱配载软件 (Container Loading Software)
+集装箱配载模拟器 (Container Loading Simulator)
 功能：优化货物在集装箱中的装载位置，最大化空间利用率
 """
 

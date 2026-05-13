@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-集装箱配载软件 (Container Loading Software) v0.6
+集装箱配载模拟器 (Container Loading Simulator) v0.6
 使用 PyQt6 + OpenGL 实现可拖动旋转的3D视图
 支持多集装箱、装载图导出、拖拽调整等高级功能
 
@@ -267,6 +267,7 @@ CONTAINERS_TRUCK = {
 # 托盘类型
 CONTAINERS_PALLET = {
     "标准托盘 (1200×1000)": Container("标准托盘", 120, 100, 150, 1000, "pallet", "欧标托盘1200×1000mm"),
+    "标准托盘 (1200×1200)": Container("标准托盘", 120, 120, 150, 1000, "pallet", "工业托盘1200×1200mm"),
     "标准托盘 (1200×800)": Container("标准托盘", 120, 80, 150, 800, "pallet", "欧标托盘1200×800mm"),
     "美标托盘 (1219×1016)": Container("美标托盘", 122, 102, 150, 1000, "pallet", "美标托盘48×40英寸"),
     "日标托盘 (1100×1100)": Container("日标托盘", 110, 110, 150, 1000, "pallet", "日标方形托盘"),
@@ -2550,7 +2551,7 @@ class ContainerLoadingApp(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("集装箱配载软件 v0.6 - by Henry Xue")
+        self.setWindowTitle("集装箱配载模拟器 v0.6 - by Henry Xue")
         self.setMinimumSize(1500, 900)
         self.resize(1600, 1000)
         
@@ -6267,7 +6268,7 @@ class ContainerLoadingApp(QMainWindow):
         """)
         
         manual_html = """
-        <h1 style="color: #81D4FA; text-align: center;">📦 集装箱配载软件使用手册</h1>
+        <h1 style="color: #81D4FA; text-align: center;">📦 集装箱配载模拟器使用手册</h1>
         <hr style="border-color: #3d3d3d;">
         
         <h2 style="color: #4FC3F7;">🚀 快速开始</h2>
@@ -6366,7 +6367,7 @@ class ContainerLoadingApp(QMainWindow):
         </table>
         
         <hr style="border-color: #3d3d3d; margin-top: 30px;">
-        <p style="text-align: center; color: #9e9e9e;">集装箱配载软件 v0.6 - by Henry Xue</p>
+        <p style="text-align: center; color: #9e9e9e;">集装箱配载模拟器 v0.6 - by Henry Xue</p>
         """
         
         content.setText(manual_html)
