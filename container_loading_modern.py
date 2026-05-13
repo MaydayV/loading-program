@@ -3835,9 +3835,12 @@ class ContainerLoadingApp(QMainWindow):
             QMessageBox.warning(self, "警告", "没有货物可导出")
             return
         
+        from datetime import datetime
+        date_str = datetime.now().strftime("%Y%m%d")
+        default_name = f"货物列表_{date_str}.xlsx" if EXCEL_SUPPORT else f"货物列表_{date_str}.json"
         file_filter = "Excel文件 (*.xlsx);;JSON文件 (*.json)" if EXCEL_SUPPORT else "JSON文件 (*.json)"
         filename, selected_filter = QFileDialog.getSaveFileName(
-            self, "导出货物", "", file_filter)
+            self, "导出货物", default_name, file_filter)
         if filename:
             try:
                 if filename.endswith('.xlsx'):
@@ -5077,8 +5080,14 @@ class ContainerLoadingApp(QMainWindow):
             QMessageBox.warning(self, "警告", "没有配载结果可导出")
             return
         
+        # 生成默认文件名
+        from datetime import datetime
+        date_str = datetime.now().strftime("%Y%m%d")
+        container_name = self.container.name if self.container else "配载"
+        default_name = f"{container_name}_配载方案_{date_str}.pdf"
+
         filename, filter_used = QFileDialog.getSaveFileName(
-            self, "导出配载方案", "", 
+            self, "导出配载方案", default_name,
             "PDF文件 (*.pdf);;文本文件 (*.txt);;JSON文件 (*.json)")
         
         if filename:
