@@ -118,35 +118,38 @@ jobs:
         run: |
           pyinstaller --onedir --windowed --name "ContainerLoadingSimulator" --icon=assets/icon_build.icns --clean container_loading_modern.py
 
-      - name: Fix Info.plist encoding
-        run: |
-          # 确保 Info.plist 使用 UTF-8 编码
-          plutil -convert xml1 dist/ContainerLoadingSimulator.app/Contents/Info.plist
-          # 设置正确的文件权限
-          chmod 644 dist/ContainerLoadingSimulator.app/Contents/Info.plist
-
-      - name: Create DMG
+      - name: Rename app and fix Info.plist
         run: |
           # 设置UTF-8语言环境
           export LANG=zh_CN.UTF-8
           export LC_ALL=zh_CN.UTF-8
 
-          # 创建临时DMG目录
+          # 重命名.app为中文名称
+          mv dist/ContainerLoadingSimulator.app "dist/集装箱配载模拟器.app"
+
+          # 更新Info.plist中的显示名称
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 集装箱配载模拟器" "dist/集装箱配载模拟器.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 集装箱配载模拟器" "dist/集装箱配载模拟器.app/Contents/Info.plist"
+
+          # 确保 Info.plist 使用 UTF-8 编码
+          plutil -convert xml1 "dist/集装箱配载模拟器.app/Contents/Info.plist"
+          chmod 644 "dist/集装箱配载模拟器.app/Contents/Info.plist"
+
+      - name: Create DMG
+        run: |
+          export LANG=zh_CN.UTF-8
+          export LC_ALL=zh_CN.UTF-8
+
           mkdir -p dmg_temp
-
-          # 复制.app到DMG目录
-          cp -R dist/ContainerLoadingSimulator.app dmg_temp/
-
-          # 创建符号链接到Applications
+          cp -R "dist/集装箱配载模拟器.app" dmg_temp/
           ln -s /Applications dmg_temp/Applications
 
-          # 创建DMG，使用HFS+文件系统支持中文
-          hdiutil create -volname "ContainerLoadingSimulator" \
+          hdiutil create -volname "集装箱配载模拟器" \
             -srcfolder dmg_temp \
             -ov -format UDZO \
             -fs HFS+ \
             -fsargs "-c c=64,a=16,e=16" \
-            ContainerLoadingSimulator.dmg
+            "集装箱配载模拟器.dmg"
 
           rm -rf dmg_temp
 
@@ -154,12 +157,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ContainerLoadingSimulator-macOS
-          path: ContainerLoadingSimulator.dmg
+          path: 集装箱配载模拟器.dmg
 
       - name: Release - macOS
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v1
         with:
-          files: ContainerLoadingSimulator.dmg
+          files: 集装箱配载模拟器.dmg
           draft: false
           prerelease: false
