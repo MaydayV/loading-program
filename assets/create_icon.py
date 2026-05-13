@@ -1,182 +1,273 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-创建应用图标
-白色网格背景 + 箱子emoji
+创建应用图标 - 现代集装箱装载模拟器图标
+深蓝渐变背景 + 白色集装箱 + 优化箭头
 """
 
-from PIL import Image, ImageDraw, ImageFont
-import os
+from PIL import Image, ImageDraw
+import os, math
 
-# 创建assets目录
 os.makedirs("assets", exist_ok=True)
 
-# 图标尺寸
-SIZES = [16, 32, 48, 64, 128, 256, 512, 1024]
+
+def hex_to_rgba(hex_color, alpha=255):
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4)) + (alpha,)
+
+
+def draw_rounded_rect(draw, xy, r, fill=None, outline=None, width=1):
+    """绘制圆角矩形"""
+    x1, y1, x2, y2 = xy
+    r = min(r, (x2 - x1) // 2, (y2 - y1) // 2)
+    if r <= 0:
+        draw.rectangle(xy, fill=fill, outline=outline, width=width)
+        return
+    # 主体
+    draw.rectangle([x1 + r, y1, x2 - r, y2], fill=fill)
+    draw.rectangle([x1, y1 + r, x2, y2 - r], fill=fill)
+    # 四角
+    draw.pieslice([x1, y1, x1 + r * 2, y1 + r * 2], 180, 270, fill=fill)
+    draw.pieslice([x2 - r * 2, y1, x2, y1 + r * 2], 270, 360, fill=fill)
+    draw.pieslice([x1, y2 - r * 2, x1 + r * 2, y2], 90, 180, fill=fill)
+    draw.pieslice([x2 - r * 2, y2 - r * 2, x2, y2], 0, 90, fill=fill)
+    if outline:
+        draw.arc([x1, y1, x1 + r * 2, y1 + r * 2], 180, 270, fill=outline, width=width)
+        draw.arc([x2 - r * 2, y1, x2, y1 + r * 2], 270, 360, fill=outline, width=width)
+        draw.arc([x1, y2 - r * 2, x1 + r * 2, y2], 90, 180, fill=outline, width=width)
+        draw.arc([x2 - r * 2, y2 - r * 2, x2, y2], 0, 90, fill=outline, width=width)
+        draw.line([x1 + r, y1, x2 - r, y1], fill=outline, width=width)
+        draw.line([x1 + r, y2, x2 - r, y2], fill=outline, width=width)
+        draw.line([x1, y1 + r, x1, y2 - r], fill=outline, width=width)
+        draw.line([x2, y1 + r, x2, y2 - r], fill=outline, width=width)
+
+
+def lerp_color(c1, c2, t):
+    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(4))
+
+
+def create_gradient_bg(size):
+    """创建深蓝渐变背景"""
+    img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    top_color = hex_to_rgba("#1a237e")   # 深蓝
+    bot_color = hex_to_rgba("#0d47a1")   # 亮蓝
+    for y in range(size):
+        t = y / size
+        color = lerp_color(top_color, bot_color, t)
+        for x in range(size):
+            img.putpixel((x, y), color)
+    return img
+
 
 def create_icon(size):
     """创建指定尺寸的图标"""
-    # 创建透明背景
+    # 背景圆角矩形
+    corner_r = int(size * 0.22)
+    margin = max(1, size // 48)
+
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+
+    # 绘制渐变背景
+    bg = create_gradient_bg(size)
+    mask = Image.new('L', (size, size), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    draw_rounded_rect(mask_draw, [margin, margin, size - margin, size - margin], corner_r, fill=255)
+    img = Image.composite(bg, img, mask)
+
     draw = ImageDraw.Draw(img)
 
-    # 绘制网格
-    grid_spacing = max(size // 8, 4)
-    grid_color = (220, 220, 220, 80)
+    # --- 集装箱主体 ---
+    container_w = int(size * 0.52)
+    container_h = int(size * 0.44)
+    cx = (size - container_w) // 2
+    cy = (size - container_h) // 2 - int(size * 0.02)
 
-    # 垂直线
-    for x in range(0, size, grid_spacing):
-        draw.line([(x, 0), (x, size)], fill=grid_color, width=1)
+    # 集装箱颜色
+    body_color = (255, 255, 255, 255)
+    shadow_color = (200, 210, 225, 255)
+    door_color = (220, 228, 240, 255)
+    accent_color = (30, 136, 229, 255)  # 蓝色强调
+    corner_color = (180, 195, 215, 255)
 
-    # 水平线
-    for y in range(0, size, grid_spacing):
-        draw.line([(0, y), (size, y)], fill=grid_color, width=1)
+    # 集装箱侧面 (阴影面 - 右侧)
+    side_w = int(container_w * 0.15)
+    draw.rectangle(
+        [cx + container_w - side_w, cy, cx + container_w, cy + container_h],
+        fill=shadow_color
+    )
 
-    # 绘制箱子 (简单的3D效果箱子)
-    # 箱子的主体
-    box_size = int(size * 0.5)
-    box_x = (size - box_size) // 2
-    box_y = (size - box_size) // 2 + int(size * 0.05)
+    # 集装箱主体正面
+    draw.rectangle(
+        [cx, cy, cx + container_w - side_w, cy + container_h],
+        fill=body_color
+    )
 
-    # 箱子正面 (棕色)
-    brown_color = (205, 133, 63, 255)  # Peru brown
-    dark_brown = (139, 69, 19, 255)    # Saddle brown
-
-    # 正面
-    draw.rectangle([box_x, box_y, box_x + box_size, box_y + box_size],
-                   fill=brown_color, outline=dark_brown, width=max(2, size // 64))
-
-    # 顶面 (较浅的棕色，透视效果)
-    top_height = int(box_size * 0.3)
-    top_points = [
-        (box_x, box_y),
-        (box_x + box_size, box_y),
-        (box_x + box_size - int(box_size * 0.15), box_y - top_height),
-        (box_x - int(box_size * 0.15), box_y - top_height)
+    # 集装箱顶部 (透视面)
+    top_h = int(container_h * 0.18)
+    top_skew = int(container_w * 0.08)
+    top_color = (235, 240, 248, 255)
+    top_pts = [
+        (cx, cy),
+        (cx + container_w - side_w, cy),
+        (cx + container_w - side_w + top_skew, cy - top_h),
+        (cx + top_skew, cy - top_h),
     ]
-    draw.polygon(top_points, fill=(245, 222, 179, 255), outline=dark_brown,
-                 width=max(2, size // 64))
+    draw.polygon(top_pts, fill=top_color)
 
-    # 侧面 (中等棕色)
-    side_points = [
-        (box_x + box_size, box_y),
-        (box_x + box_size - int(box_size * 0.15), box_y - top_height),
-        (box_x + box_size - int(box_size * 0.15), box_y + box_size - top_height),
-        (box_x + box_size, box_y + box_size)
+    # 侧面顶部
+    side_top_pts = [
+        (cx + container_w - side_w, cy),
+        (cx + container_w, cy),
+        (cx + container_w, cy - top_h),
+        (cx + container_w - side_w + top_skew, cy - top_h),
     ]
-    draw.polygon(side_points, fill=(160, 82, 45, 255), outline=dark_brown,
-                 width=max(2, size // 64))
+    draw.polygon(side_top_pts, fill=(175, 188, 210, 255))
 
-    # 绘制箱子边框加强线
-    # 垂直交叉线
-    center_x = box_x + box_size // 2
-    center_y = box_y + box_size // 2
-    line_width = max(2, size // 128)
+    # --- 集装箱波纹线条 ---
+    line_count = max(3, container_h // (max(4, size // 32)))
+    line_spacing = container_h // (line_count + 1)
+    line_color = (210, 218, 232, 200)
+    for i in range(1, line_count + 1):
+        ly = cy + i * line_spacing
+        draw.line(
+            [(cx + int(container_w * 0.05), ly),
+             (cx + container_w - side_w - int(container_w * 0.05), ly)],
+            fill=line_color,
+            width=max(1, size // 256)
+        )
 
-    # 垂直线
-    draw.line([(box_x, box_y), (box_x, box_y + box_size)],
-               fill=dark_brown, width=line_width)
-    draw.line([(box_x + box_size, box_y), (box_x + box_size, box_y + box_size)],
-               fill=dark_brown, width=line_width)
+    # --- 集装箱门缝 ---
+    door_x = cx + (container_w - side_w) // 2
+    door_line_color = (190, 200, 215, 200)
+    gap = max(1, size // 512)
+    draw.line(
+        [(door_x - gap, cy + int(container_h * 0.08)),
+         (door_x - gap, cy + container_h - int(container_h * 0.08))],
+        fill=door_line_color, width=max(1, size // 192)
+    )
+    draw.line(
+        [(door_x + gap, cy + int(container_h * 0.08)),
+         (door_x + gap, cy + container_h - int(container_h * 0.08))],
+        fill=door_line_color, width=max(1, size // 192)
+    )
 
-    # 水平线
-    draw.line([(box_x, box_y), (box_x + box_size, box_y)],
-               fill=dark_brown, width=line_width)
-    draw.line([(box_x, box_y + box_size // 2), (box_x + box_size, box_y + box_size // 2)],
-               fill=dark_brown, width=line_width)
-    draw.line([(box_x, box_y + box_size), (box_x + box_size, box_y + box_size)],
-               fill=dark_brown, width=line_width)
+    # --- 门把手/锁杆 ---
+    lock_w = max(1, size // 128)
+    lock_h = int(container_h * 0.22)
+    lock_color = (140, 158, 180, 255)
+    for lx_off in [-int(container_w * 0.06), int(container_w * 0.06)]:
+        lx = door_x + lx_off
+        draw.rectangle(
+            [lx - lock_w, cy + container_h // 2 - lock_h // 2,
+             lx + lock_w, cy + container_h // 2 + lock_h // 2],
+            fill=lock_color
+        )
+
+    # --- 角件 (集装箱八个角的方块) ---
+    corner_size = max(2, size // 64)
+    corners = [
+        (cx, cy),  # 左上
+        (cx + container_w - side_w - corner_size, cy),  # 右上(正面)
+        (cx, cy + container_h - corner_size),  # 左下
+        (cx + container_w - side_w - corner_size, cy + container_h - corner_size),  # 右下
+    ]
+    for cx_c, cy_c in corners:
+        draw.rectangle(
+            [cx_c, cy_c, cx_c + corner_size, cy_c + corner_size],
+            fill=corner_color
+        )
+
+    # --- 蓝色优化箭头 (右下角) ---
+    arrow_size = int(size * 0.2)
+    arrow_margin = int(size * 0.12)
+    ax = size - arrow_margin - arrow_size // 2
+    ay = size - arrow_margin - arrow_size // 2
+
+    # 圆形背景
+    circle_r = arrow_size // 2 + int(size * 0.03)
+    draw.ellipse(
+        [ax - circle_r, ay - circle_r, ax + circle_r, ay + circle_r],
+        fill=accent_color
+    )
+
+    # 向上箭头
+    arrow_len = int(arrow_size * 0.6)
+    arrow_thick = max(2, size // 64)
+    arrow_head = int(arrow_size * 0.25)
+    draw.line(
+        [(ax, ay - arrow_len // 2), (ax, ay + arrow_len // 2)],
+        fill=(255, 255, 255, 255), width=arrow_thick
+    )
+    # 箭头尖
+    draw.polygon(
+        [(ax - arrow_head, ay - arrow_len // 2 + arrow_head),
+         (ax, ay - arrow_len // 2 - arrow_head // 3),
+         (ax + arrow_head, ay - arrow_len // 2 + arrow_head)],
+        fill=(255, 255, 255, 255)
+    )
 
     return img
+
 
 def create_ico():
     """创建Windows ICO文件"""
     print("创建 icon.ico...")
-    from PIL import Image
-
     images = []
     for size in [16, 32, 48, 256]:
-        img = create_icon(size)
-        images.append(img)
-
-    # 保存为ICO
-    ico_img = images[-1]
-    ico_img.save("assets/icon.ico", format='ICO', sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+        images.append(create_icon(size))
+    images[-1].save("assets/icon.ico", format='ICO',
+                    sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
     print("  -> assets/icon.ico")
+
 
 def create_icns():
     """创建macOS ICNS文件"""
     print("创建 icon.icns...")
-
-    # macOS需要的尺寸
     iconset_dir = "assets/icon.iconset"
     os.makedirs(iconset_dir, exist_ok=True)
 
-    sizes = {
-        "icon_16x16.png": 16,
-        "icon_32x16.png": 32,  # Retina
-        "icon_16x32.png": 16,  # Retina
-        "icon_32x32.png": 32,
-        "icon_128x16.png": 128,
-        "icon_256x16.png": 256,  # Retina
-        "icon_128x32.png": 128,
-        "icon_256x32.png": 256,  # Retina
-        "icon_128x128.png": 128,
-        "icon_256x256.png": 256,
-        "icon_256x128.png": 256,
-        "icon_512x128.png": 512,  # Retina
-        "icon_256x256.png": 256,
-        "icon_512x256.png": 512,  # Retina
-        "icon_512x512.png": 512,
-        "icon_1024x512.png": 1024,  # Retina
-    }
-
-    for filename, size in [(f"icon_{x}x{x}.png", x) for x in [16, 32, 128, 256, 512, 1024]]:
+    for size in [16, 32, 128, 256, 512, 1024]:
         img = create_icon(size)
-        img.save(f"{iconset_dir}/{filename}", format='PNG')
+        img.save(f"{iconset_dir}/icon_{size}x{size}.png", format='PNG')
         if size >= 32:
             img_2x = create_icon(size * 2)
             img_2x.save(f"{iconset_dir}/icon_{size}x{size}@2x.png", format='PNG')
 
-    # 使用iconutil创建ICNS (仅在macOS上)
     import subprocess
     try:
         subprocess.run(['iconutil', '-c', 'icns', iconset_dir, '-o', 'assets/icon.icns'],
                        check=True, capture_output=True)
         print("  -> assets/icon.icns")
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("  警告: iconutil不可用，ICNS将使用PIL创建")
-        # 备用方案：创建单个大尺寸PNG
-        img = create_icon(1024)
-        img.save("assets/icon.png", format='PNG')
+        print("  警告: iconutil不可用")
+        create_icon(1024).save("assets/icon.png", format='PNG')
         print("  -> assets/icon.png (备用)")
+
 
 def create_png():
     """创建PNG图标"""
     print("创建 icon.png...")
-    img = create_icon(1024)
-    img.save("assets/icon.png", format='PNG')
+    create_icon(1024).save("assets/icon.png", format='PNG')
     print("  -> assets/icon.png")
+
 
 def create_favicon():
     """创建网站favicon"""
     print("创建 favicon.ico...")
-    img = create_icon(32)
-    img.save("assets/favicon.ico", format='ICO')
+    create_icon(32).save("assets/favicon.ico", format='ICO')
     print("  -> assets/favicon.ico")
 
-if __name__ == "__main__":
-    print("========================================")
-    print("  生成应用图标")
-    print("========================================")
-    print()
 
+if __name__ == "__main__":
+    print("=" * 48)
+    print("  生成应用图标")
+    print("=" * 48)
+    print()
     create_ico()
     create_icns()
     create_png()
     create_favicon()
-
     print()
-    print("========================================")
+    print("=" * 48)
     print("  图标生成完成！")
-    print("========================================")
+    print("=" * 48)
